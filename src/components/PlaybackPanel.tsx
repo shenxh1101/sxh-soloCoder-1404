@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import {
   Play,
   Pause,
@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Wrench,
   ArrowRight,
+  ArrowLeft,
   Bookmark,
   MapPin,
   Gauge,
@@ -18,10 +19,13 @@ import {
   Layers,
   ChevronDown,
   ChevronUp,
+  X,
+  Activity,
+  Link,
 } from 'lucide-react';
 import { useConstructionStore } from '../store/useConstructionStore';
 import { RING_LENGTH, STRATUM_NAMES } from '../utils/constants';
-import { TimelineEventType, BookmarkType } from '../types';
+import { TimelineEventType, BookmarkType, BookmarkNode } from '../types';
 
 const EVENT_ICONS: Record<TimelineEventType, JSX.Element> = {
   excavation_start: <ArrowRight className="w-3 h-3" />,
@@ -53,6 +57,8 @@ const BOOKMARK_FILTERS: { type: BookmarkType | 'all'; label: string; icon: strin
   { type: 'mileage_milestone', label: '里程突破', icon: '🎯' },
 ];
 
+const CONTEXT_RADIUS = 30;
+
 export function PlaybackPanel() {
   const {
     playbackMode,
@@ -76,6 +82,7 @@ export function PlaybackPanel() {
 
   const [bookmarkFilter, setBookmarkFilter] = useState<BookmarkType | 'all'>('all');
   const [showBookmarks, setShowBookmarks] = useState(true);
+  const [contextBookmark, setContextBookmark] = useState<BookmarkNode | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -127,6 +134,65 @@ export function PlaybackPanel() {
   const isInAssemblyPhase = currentSnapshot?.awaitingAssembly;
   const activeWarningTypes = currentSnapshot?.activeWarningTypes || [];
 
+  const handleBookmarkClick = (bookmark: BookmarkNode) => {
+    jumpToBookmark(bookmark.id);
+    setContextBookmark(bookmark);
+  };
+
+  const contextData = useMemo(() => {
+    if (!contextBookmark || totalSnapshots === 0) return null;
+
+    const centerIdx = contextBookmark.snapshotIndex;
+    const startIdx = Math.max(0, centerIdx - CONTEXT_RADIUS);
+    const endIdx = Math.min(totalSnapshots - 1, centerIdx + CONTEXT_RADIUS);
+    const contextSnapshots = playbackSnapshots.slice(startIdx, endIdx + 1);
+
+    const contextEvents = allTimelineEvents.filter(
+      (e) => e.snapshotIndex >= startIdx && e.snapshotIndex <= endIdx
+    ).sort((a, b) => a.snapshotIndex - b.snapshotIndex);
+
+    const relatedWarnings = contextEvents.filter(
+      (e) => e.type === 'warning_start' || e.type === 'warning_end'
+    );
+
+    const nearbyBookmarks = bookmarks.filter(
+      (b) => b.snapshotIndex >= startIdx && b.snapshotIndex <= endIdx && b.id !== contextBookmark.id
+    ).sort((a, b) => a.snapshotIndex - b.snapshotIndex);
+
+    const beforeSnapshots = contextSnapshots.filter((_, i) => startIdx + i < centerIdx);
+    const afterSnapshots = contextSnapshots.filter((_, i) => startIdx + i > centerIdx);
+
+    const beforeMinThrust = beforeSnapshots.length > 0 ? Math.min(...beforeSnapshots.map(s => s.thrust)) : 0;
+    const beforeMaxThrust = beforeSnapshots.length > 0 ? Math.max(...beforeSnapshots.map(s => s.thrust)) : 0;
+    const afterMinThrust = afterSnapshots.length > 0 ? Math.min(...afterSnapshots.map(s => s.thrust)) : 0;
+    const afterMaxThrust = afterSnapshots.length > 0 ? Math.max(...afterSnapshots.map(s => s.thrust)) : 0;
+
+    const beforeMinTorque = beforeSnapshots.length > 0 ? Math.min(...beforeSnapshots.map(s => s.torque)) : 0;
+    const beforeMaxTorque = beforeSnapshots.length > 0 ? Math.max(...beforeSnapshots.map(s => s.torque)) : 0;
+    const afterMinTorque = afterSnapshots.length > 0 ? Math.min(...afterSnapshots.map(s => s.torque)) : 0;
+    const afterMaxTorque = afterSnapshots.length > 0 ? Math.max(...afterSnapshots.map(s => s.torque)) : 0;
+
+    return {
+      startIdx,
+      endIdx,
+      centerIdx,
+      contextSnapshots,
+      contextEvents,
+      relatedWarnings,
+      nearbyBookmarks,
+      before: {
+        thrustRange: [beforeMinThrust, beforeMaxThrust],
+        torqueRange: [beforeMinTorque, beforeMaxTorque],
+        count: beforeSnapshots.length,
+      },
+      after: {
+        thrustRange: [afterMinThrust, afterMaxThrust],
+        torqueRange: [afterMinTorque, afterMaxTorque],
+        count: afterSnapshots.length,
+      },
+    };
+  }, [contextBookmark, totalSnapshots, playbackSnapshots, allTimelineEvents, bookmarks]);
+
   return (
     <div className="bg-gray-900/90 backdrop-blur-md rounded-xl p-5 border border-gray-700 shadow-2xl">
       <div className="flex items-center justify-between mb-4">
@@ -136,7 +202,7 @@ export function PlaybackPanel() {
         </h2>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setPlaybackMode('live')}
+            onClick={() => { setPlaybackMode('live'); setContextBookmark(null); }}
             className={`px-3 py-1.5 text-xs rounded-md font-medium transition-all ${
               playbackMode === 'live'
                 ? 'bg-green-600 text-white'
@@ -337,15 +403,16 @@ export function PlaybackPanel() {
               <div className="relative h-5">
                 {bookmarks.map((bookmark) => {
                   const leftPercent = (bookmark.snapshotIndex / totalSnapshots) * 100;
+                  const isActive = contextBookmark?.id === bookmark.id;
                   return (
                     <button
                       key={bookmark.id}
-                      onClick={() => jumpToBookmark(bookmark.id)}
-                      className="absolute top-0 -translate-x-1/2 hover:scale-125 transition-transform cursor-pointer z-10"
+                      onClick={() => handleBookmarkClick(bookmark)}
+                      className={`absolute top-0 -translate-x-1/2 hover:scale-125 transition-transform cursor-pointer z-10 ${isActive ? 'scale-125' : ''}`}
                       style={{ left: `${leftPercent}%` }}
                       title={`${bookmark.icon} ${bookmark.title}`}
                     >
-                      <span className="text-sm">{bookmark.icon}</span>
+                      <span className={`text-sm ${isActive ? 'drop-shadow-lg' : ''}`}>{bookmark.icon}</span>
                     </button>
                   );
                 })}
@@ -382,6 +449,139 @@ export function PlaybackPanel() {
               </div>
             </div>
           </div>
+
+          {contextBookmark && contextData && (
+            <div className="bg-gradient-to-br from-purple-900/40 to-indigo-900/30 rounded-lg p-4 border border-purple-700/50 shadow-lg shadow-purple-900/20">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Link className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm font-bold text-purple-200">节点复盘上下文</span>
+                </div>
+                <button
+                  onClick={() => setContextBookmark(null)}
+                  className="p-1 rounded hover:bg-gray-700/50 transition-colors"
+                >
+                  <X className="w-4 h-4 text-gray-500" />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 mb-3 pb-3 border-b border-purple-700/30">
+                <span className="text-2xl">{contextBookmark.icon}</span>
+                <div>
+                  <p className="text-white font-bold text-sm">{contextBookmark.title}</p>
+                  <p className="text-purple-300 text-[11px]">
+                    #{contextBookmark.ringNumber} · {contextBookmark.mileage.toFixed(1)}m · {new Date(contextBookmark.timestamp).toLocaleTimeString()}
+                  </p>
+                  {contextBookmark.description && (
+                    <p className="text-gray-400 text-[11px] mt-0.5">{contextBookmark.description}</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                <div className="bg-gray-900/50 rounded p-2 border border-green-700/30">
+                  <p className="text-[10px] text-green-400 mb-1 flex items-center gap-1">
+                    <ArrowLeft className="w-3 h-3" /> 节点前 ({contextData.before.count}帧)
+                  </p>
+                  <div className="space-y-0.5">
+                    <p className="text-[10px] text-gray-400">
+                      推力 <span className="text-yellow-400 font-mono">{contextData.before.thrustRange[0].toFixed(0)}~{contextData.before.thrustRange[1].toFixed(0)}</span> kN
+                    </p>
+                    <p className="text-[10px] text-gray-400">
+                      扭矩 <span className="text-red-400 font-mono">{contextData.before.torqueRange[0].toFixed(0)}~{contextData.before.torqueRange[1].toFixed(0)}</span> kN·m
+                    </p>
+                  </div>
+                </div>
+                <div className="bg-gray-900/50 rounded p-2 border border-blue-700/30">
+                  <p className="text-[10px] text-blue-400 mb-1 flex items-center gap-1">
+                    节点后 ({contextData.after.count}帧) <ArrowRight className="w-3 h-3" />
+                  </p>
+                  <div className="space-y-0.5">
+                    <p className="text-[10px] text-gray-400">
+                      推力 <span className="text-yellow-400 font-mono">{contextData.after.thrustRange[0].toFixed(0)}~{contextData.after.thrustRange[1].toFixed(0)}</span> kN
+                    </p>
+                    <p className="text-[10px] text-gray-400">
+                      扭矩 <span className="text-red-400 font-mono">{contextData.after.torqueRange[0].toFixed(0)}~{contextData.after.torqueRange[1].toFixed(0)}</span> kN·m
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {contextData.contextEvents.length > 0 && (
+                <div className="mb-2">
+                  <p className="text-[10px] text-gray-400 mb-1.5 flex items-center gap-1">
+                    <Activity className="w-3 h-3" />
+                    前后事件链
+                  </p>
+                  <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar">
+                    {contextData.contextEvents.map((event) => {
+                      const isCenter = Math.abs(event.snapshotIndex - contextData.centerIdx) < 3;
+                      return (
+                        <div
+                          key={event.id}
+                          className={`flex items-start gap-2 text-[11px] p-1 rounded ${
+                            isCenter ? 'bg-purple-900/50 border border-purple-600/50' : 'hover:bg-gray-800/50'
+                          }`}
+                        >
+                          <div
+                            className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${EVENT_COLORS[event.type]} text-white`}
+                          >
+                            {EVENT_ICONS[event.type]}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className={`truncate ${isCenter ? 'text-purple-200 font-medium' : 'text-gray-400'}`}>
+                              {event.description}
+                            </p>
+                            <p className="text-gray-600 text-[9px]">
+                              #{event.ringNumber} · {event.mileage.toFixed(1)}m
+                              {isCenter ? ' · ← 当前节点' : ''}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => setPlaybackIndex(event.snapshotIndex)}
+                            className="text-[9px] text-purple-400 hover:text-purple-300 flex-shrink-0"
+                          >
+                            跳转
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {contextData.relatedWarnings.length > 0 && (
+                <div className="p-2 bg-red-900/20 border border-red-700/30 rounded">
+                  <p className="text-[10px] text-red-300 mb-1 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" />
+                    相关告警 ({contextData.relatedWarnings.length})
+                  </p>
+                  <div className="space-y-0.5">
+                    {contextData.relatedWarnings.map((w) => (
+                      <p key={w.id} className="text-[10px] text-gray-400">
+                        <span className="text-red-400">●</span> #{w.ringNumber} · {w.description}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {contextData.nearbyBookmarks.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <span className="text-[9px] text-gray-500">相邻节点:</span>
+                  {contextData.nearbyBookmarks.map((b) => (
+                    <button
+                      key={b.id}
+                      onClick={() => handleBookmarkClick(b)}
+                      className="text-[10px] px-1.5 py-0.5 bg-gray-800/60 hover:bg-purple-900/40 rounded border border-gray-700/50 hover:border-purple-600/50 transition-all"
+                    >
+                      {b.icon} {b.title}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             {filteredEvents.length > 0 && playbackMode === 'playback' && (
@@ -457,12 +657,15 @@ export function PlaybackPanel() {
                       ) : (
                         filteredBookmarks.map((bookmark) => {
                           const isActive = Math.abs(bookmark.snapshotIndex - playbackIndex) < 5;
+                          const isContext = contextBookmark?.id === bookmark.id;
                           return (
                             <button
                               key={bookmark.id}
-                              onClick={() => jumpToBookmark(bookmark.id)}
+                              onClick={() => handleBookmarkClick(bookmark)}
                               className={`w-full text-left flex items-start gap-2 text-xs p-1.5 rounded transition-all ${
-                                isActive
+                                isContext
+                                  ? 'bg-purple-900/50 border border-purple-500/50'
+                                  : isActive
                                   ? 'bg-purple-900/40 border border-purple-700/50'
                                   : 'hover:bg-gray-700/50'
                               }`}

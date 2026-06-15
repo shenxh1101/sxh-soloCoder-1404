@@ -333,6 +333,208 @@ function formatDateTime(date: Date): string {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+export function exportDailyReportToHTML(
+  records: RingRecord[],
+  summary: DailyReportSummary,
+  bookmarks: BookmarkNode[],
+  startRing: number,
+  endRing: number,
+  chartImages: Record<string, string>
+): void {
+  const filteredBookmarks = bookmarks.filter(
+    (b) => b.ringNumber >= startRing && b.ringNumber <= endRing
+  );
+
+  const warningRows = records
+    .filter((r) => r.warningEvents.length > 0)
+    .flatMap((r) =>
+      r.warningEvents.map((w) => `
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${r.ringNumber}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">${w.type === 'thrust' ? '推力超限' : '扭矩超限'}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">${w.peakValue.toFixed(0)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">${w.threshold.toFixed(0)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">${(((w.peakValue - w.threshold) / w.threshold) * 100).toFixed(1)}%</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #374151;">${formatDateTime(w.startTime)}</td>
+        </tr>
+      `)
+    ).join('');
+
+  const bookmarkRows = filteredBookmarks
+    .sort((a, b) => a.snapshotIndex - b.snapshotIndex)
+    .map(
+      (b) => `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.icon}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${BOOKMARK_TYPE_NAMES[b.type] || b.type}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.title}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${b.ringNumber}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.mileage.toFixed(1)}m</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${formatDateTime(b.timestamp)}</td>
+      </tr>
+    `
+    ).join('');
+
+  const ringRows = records
+    .map(
+      (r) => `
+      <tr style="${r.hasWarning ? 'background:rgba(239,68,68,0.08)' : ''}">
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${r.ringNumber}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.dateKey}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${getShiftName(r.shift)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.excavationEfficiency.toFixed(1)}%</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.averageSpeed.toFixed(1)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.averageThrust.toFixed(0)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.averageTorque.toFixed(0)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${STRATUM_NAMES[r.stratum]}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${r.assemblyTime.toFixed(1)}s</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;${r.hasWarning ? 'color:#EF4444;font-weight:bold' : ''}">${r.hasWarning ? `${r.warningCount}次` : '-'}</td>
+      </tr>
+    `
+    ).join('');
+
+  const trendImageSection = chartImages.trend
+    ? `<div style="margin-bottom:30px;">
+        <h3 style="color:#10B981;font-size:16px;margin-bottom:10px;">📈 掘进效率与拼装耗时趋势</h3>
+        <img src="${chartImages.trend}" style="max-width:100%;border-radius:8px;border:1px solid #374151;" />
+      </div>`
+    : '';
+
+  const warningImageSection = chartImages.warning
+    ? `<div style="margin-bottom:30px;">
+        <h3 style="color:#EF4444;font-size:16px;margin-bottom:10px;">⚠️ 每环告警次数分布</h3>
+        <img src="${chartImages.warning}" style="max-width:100%;border-radius:8px;border:1px solid #374151;" />
+      </div>`
+    : '';
+
+  const stratumImageSection = chartImages.stratum
+    ? `<div style="margin-bottom:30px;">
+        <h3 style="color:#D97706;font-size:16px;margin-bottom:10px;">🪨 地层占比汇总</h3>
+        <img src="${chartImages.stratum}" style="max-width:100%;border-radius:8px;border:1px solid #374151;" />
+      </div>`
+    : '';
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>盾构施工日报 — 第${startRing}~${endRing}环</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; padding: 40px; }
+    h1 { font-size: 28px; margin-bottom: 8px; background: linear-gradient(to right, #3b82f6, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    h2 { font-size: 20px; margin: 30px 0 15px; border-left: 4px solid #3b82f6; padding-left: 12px; }
+    .meta { color: #94a3b8; font-size: 13px; margin-bottom: 30px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 30px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 16px; }
+    .card .label { color: #94a3b8; font-size: 12px; margin-bottom: 4px; }
+    .card .value { font-size: 24px; font-weight: bold; font-family: monospace; }
+    .card .sub { color: #64748b; font-size: 11px; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; margin-bottom: 20px; }
+    th { background: #0f172a; color: #94a3b8; font-size: 12px; padding: 10px; text-align: left; border-bottom: 2px solid #334155; }
+    td { font-size: 13px; }
+    .blue { color: #3b82f6; }
+    .green { color: #10b981; }
+    .amber { color: #f59e0b; }
+    .red { color: #ef4444; }
+    .cyan { color: #06b6d4; }
+    .section { margin-bottom: 40px; }
+    @media print { body { background: white; color: #1e293b; } .card { border-color: #e2e8f0; } table { border-color: #e2e8f0; } }
+  </style>
+</head>
+<body>
+  <h1>盾构施工日报</h1>
+  <p class="meta">
+    统计范围: 第 ${startRing} 环 — 第 ${endRing} 环 &nbsp;|&nbsp;
+    导出时间: ${formatDateTime(new Date())} &nbsp;|&nbsp;
+    共 ${summary.totalRings} 环 / ${summary.totalMileage.toFixed(1)} 米
+  </p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">完成环数</div>
+      <div class="value blue">${summary.totalRings} <span style="font-size:14px;color:#64748b">环</span></div>
+      <div class="sub">${summary.totalMileage.toFixed(1)} 米</div>
+    </div>
+    <div class="card">
+      <div class="label">平均掘进效率</div>
+      <div class="value green">${summary.avgExcavationEfficiency.toFixed(1)}%</div>
+      <div class="sub">总耗时 ${(summary.totalExcavationTime / 60).toFixed(1)} 分钟</div>
+    </div>
+    <div class="card">
+      <div class="label">平均推力 / 扭矩</div>
+      <div class="value amber">${summary.avgThrust.toFixed(0)} <span style="font-size:12px">kN</span></div>
+      <div class="value red" style="font-size:18px;margin-top:4px">${summary.avgTorque.toFixed(0)} <span style="font-size:12px">kN·m</span></div>
+    </div>
+    <div class="card">
+      <div class="label">告警情况</div>
+      <div class="value red">${summary.ringsWithWarnings} / ${summary.totalRings} <span style="font-size:12px">环</span></div>
+      <div class="sub">共 ${summary.totalWarnings} 次超限</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>趋势图表</h2>
+    ${trendImageSection}
+    ${warningImageSection}
+    ${stratumImageSection}
+  </div>
+
+  <div class="section">
+    <h2>每环施工详情</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>环号</th><th>日期</th><th>班次</th><th>掘进效率</th>
+          <th>速度(mm/min)</th><th>推力(kN)</th><th>扭矩(kN·m)</th>
+          <th>地层</th><th>拼装耗时</th><th>告警</th>
+        </tr>
+      </thead>
+      <tbody>${ringRows}</tbody>
+    </table>
+  </div>
+
+  ${warningRows ? `
+  <div class="section">
+    <h2>告警摘要</h2>
+    <table>
+      <thead>
+        <tr><th>环号</th><th>告警类型</th><th>峰值</th><th>阈值</th><th>超幅</th><th>开始时间</th></tr>
+      </thead>
+      <tbody>${warningRows}</tbody>
+    </table>
+  </div>
+  ` : ''}
+
+  ${bookmarkRows ? `
+  <div class="section">
+    <h2>关键节点摘要</h2>
+    <table>
+      <thead>
+        <tr><th>图标</th><th>类型</th><th>标题</th><th>环号</th><th>里程</th><th>时间</th></tr>
+      </thead>
+      <tbody>${bookmarkRows}</tbody>
+    </table>
+  </div>
+  ` : ''}
+
+  <div style="text-align:center;color:#475569;font-size:11px;margin-top:40px;padding-top:20px;border-top:1px solid #334155;">
+    盾构机隧道掘进模拟系统 — 自动生成施工日报
+  </div>
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `盾构施工日报_${startRing}-${endRing}环_${formatDateForFilename()}.html`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function formatDateForFilename(): string {
   const d = new Date();
   const year = d.getFullYear();

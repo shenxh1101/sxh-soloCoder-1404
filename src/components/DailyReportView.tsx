@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useCallback } from 'react';
 import {
   BarChart3,
   Download,
@@ -16,6 +16,8 @@ import {
   Filter,
   BarChart2,
   PieChart,
+  ArrowLeftRight,
+  FileText,
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -33,7 +35,7 @@ import { Bar, Line, Doughnut } from 'react-chartjs-2';
 import { useConstructionStore } from '../store/useConstructionStore';
 import { STRATUM_NAMES, RING_LENGTH } from '../utils/constants';
 import { DailyReportSummary, RingRecord, ShiftType, SHIFT_CONFIGS, StratumType } from '../types';
-import { exportDailyReportToExcel } from '../utils/excelExport';
+import { exportDailyReportToExcel, exportDailyReportToHTML } from '../utils/excelExport';
 
 ChartJS.register(
   CategoryScale,
@@ -47,7 +49,7 @@ ChartJS.register(
   ArcElement
 );
 
-type GroupMode = 'ring' | 'shift' | 'date';
+type GroupMode = 'ring' | 'shift' | 'date' | 'teamReview';
 
 const SHIFT_NAMES: Record<ShiftType, string> = {
   morning: '早班',
@@ -72,6 +74,10 @@ export function DailyReportView() {
   const [showWarnings, setShowWarnings] = useState(true);
   const [groupMode, setGroupMode] = useState<GroupMode>('ring');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  const trendChartRef = useRef<any>(null);
+  const warningChartRef = useRef<any>(null);
+  const stratumChartRef = useRef<any>(null);
 
   const maxRing = ringRecords.length;
   const effectiveEndRing = endRing === 0 || endRing > maxRing ? maxRing : endRing;
@@ -130,8 +136,29 @@ export function DailyReportView() {
     });
   };
 
+  const getChartImages = useCallback(() => {
+    const images: Record<string, string> = {};
+    try {
+      if (trendChartRef.current) {
+        const canvas = trendChartRef.current.canvas;
+        if (canvas) images.trend = canvas.toDataURL('image/png');
+      }
+      if (warningChartRef.current) {
+        const canvas = warningChartRef.current.canvas;
+        if (canvas) images.warning = canvas.toDataURL('image/png');
+      }
+      if (stratumChartRef.current) {
+        const canvas = stratumChartRef.current.canvas;
+        if (canvas) images.stratum = canvas.toDataURL('image/png');
+      }
+    } catch {}
+    return images;
+  }, []);
+
   const handleExportReport = () => {
+    const chartImages = getChartImages();
     exportDailyReportToExcel(filteredRecords, summary, bookmarks, allWarnings, effectiveStartRing, effectiveEndRing);
+    exportDailyReportToHTML(filteredRecords, summary, bookmarks, effectiveStartRing, effectiveEndRing, chartImages);
   };
 
   const trendChartData = useMemo(() => {
@@ -233,6 +260,26 @@ export function DailyReportView() {
       ],
     };
   }, [groupedByShift]);
+
+  const teamReviewData = useMemo(() => {
+    const dateKeys = Object.keys(groupedByDate).sort();
+    return dateKeys.map((dateKey) => {
+      const dayRecords = groupedByDate[dateKey];
+      const shifts: Record<ShiftType, { records: RingRecord[]; summary: DailyReportSummary }> = {} as any;
+
+      for (const sc of SHIFT_CONFIGS) {
+        const shiftRecords = dayRecords.filter((r) => r.shift === sc.type);
+        if (shiftRecords.length > 0) {
+          shifts[sc.type] = {
+            records: shiftRecords,
+            summary: calculateSummary(shiftRecords),
+          };
+        }
+      }
+
+      return { dateKey, shifts };
+    });
+  }, [groupedByDate]);
 
   const commonChartOptions = {
     responsive: true,
@@ -346,6 +393,17 @@ export function DailyReportView() {
                   <Calendar className="w-3 h-3" />
                   按日期
                 </button>
+                <button
+                  onClick={() => setGroupMode('teamReview')}
+                  className={`flex items-center gap-1 px-3 py-1 text-xs rounded-md font-medium transition-all ${
+                    groupMode === 'teamReview'
+                      ? 'bg-pink-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <ArrowLeftRight className="w-3 h-3" />
+                  班组复盘
+                </button>
               </div>
 
               <div className="flex-1" />
@@ -362,309 +420,495 @@ export function DailyReportView() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <div className="bg-gradient-to-br from-blue-900/40 to-blue-800/20 rounded-lg p-3 border border-blue-700/30">
-              <p className="text-xs text-blue-300 mb-1">完成环数</p>
-              <p className="text-xl font-bold text-white font-mono">
-                {summary.totalRings}
-                <span className="text-xs text-blue-400 ml-1">环</span>
-              </p>
-              <p className="text-[10px] text-blue-400/70">
-                {summary.totalMileage.toFixed(1)} 米
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-green-900/40 to-green-800/20 rounded-lg p-3 border border-green-700/30">
-              <p className="text-xs text-green-300 mb-1">平均掘进效率</p>
-              <p className="text-xl font-bold text-green-400 font-mono">
-                {summary.avgExcavationEfficiency.toFixed(1)}
-                <span className="text-xs text-green-400/70 ml-1">%</span>
-              </p>
-              <p className="text-[10px] text-green-400/70">
-                总耗时 {(summary.totalExcavationTime + summary.totalAssemblyTime).toFixed(0)}s
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-amber-900/40 to-amber-800/20 rounded-lg p-3 border border-amber-700/30">
-              <p className="text-xs text-amber-300 mb-1">平均推力 / 扭矩</p>
-              <p className="text-lg font-bold text-amber-400 font-mono">
-                {summary.avgThrust.toFixed(0)}
-                <span className="text-[10px] text-amber-300 ml-1">kN</span>
-              </p>
-              <p className="text-lg font-bold text-red-400 font-mono">
-                {summary.avgTorque.toFixed(0)}
-                <span className="text-[10px] text-red-300 ml-1">kN·m</span>
-              </p>
-            </div>
-            <div className="bg-gradient-to-br from-red-900/40 to-red-800/20 rounded-lg p-3 border border-red-700/30">
-              <p className="text-xs text-red-300 mb-1">告警情况</p>
-              <p className="text-xl font-bold text-red-400 font-mono">
-                {summary.ringsWithWarnings}
-                <span className="text-xs text-red-300 ml-1">/ {summary.totalRings} 环</span>
-              </p>
-              <p className="text-[10px] text-red-400/70">
-                共 {summary.totalWarnings} 次超限
-              </p>
-            </div>
-          </div>
-
-          {filteredRecords.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
-                  <TrendingUp className="w-3 h-3" />
-                  掘进效率与拼装耗时趋势
-                </p>
-                <div className="h-44">
-                  <Line
-                    data={trendChartData}
-                    options={{
-                      ...commonChartOptions,
-                      scales: {
-                        ...commonChartOptions.scales,
-                        y: {
-                          position: 'left' as const,
-                          grid: { color: 'rgba(75, 85, 99, 0.3)' },
-                          ticks: { color: '#10B981', font: { size: 10 } },
-                          title: { display: true, text: '效率 (%)', color: '#10B981', font: { size: 10 } },
-                        },
-                        y1: {
-                          position: 'right' as const,
-                          grid: { drawOnChartArea: false },
-                          ticks: { color: '#06B6D4', font: { size: 10 } },
-                          title: { display: true, text: '拼装 (s)', color: '#06B6D4', font: { size: 10 } },
-                        },
-                      },
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
-                  <AlertTriangle className="w-3 h-3" />
-                  每环告警次数分布
-                </p>
-                <div className="h-44">
-                  <Bar data={warningTrendData} options={{
-                    ...commonChartOptions,
-                    scales: {
-                      ...commonChartOptions.scales,
-                      y: {
-                        grid: { color: 'rgba(75, 85, 99, 0.3)' },
-                        ticks: { color: '#EF4444', font: { size: 10 }, stepSize: 1 },
-                        title: { display: true, text: '次数', color: '#EF4444', font: { size: 10 } },
-                      },
-                    },
-                  }} />
-                </div>
-              </div>
-
-              <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
-                  <PieChart className="w-3 h-3" />
-                  地层占比汇总
-                </p>
-                <div className="h-44 flex items-center justify-center">
-                  <Doughnut
-                    data={stratumChartData}
-                    options={{
-                      responsive: true,
-                      maintainAspectRatio: false,
-                      plugins: {
-                        legend: {
-                          position: 'right' as const,
-                          labels: { color: '#9CA3AF', font: { size: 11 } },
-                        },
-                        tooltip: {
-                          backgroundColor: 'rgba(17, 24, 39, 0.9)',
-                          callbacks: {
-                            label: (ctx) => `${ctx.label}: ${ctx.parsed.toFixed(1)}%`,
-                          },
-                        },
-                      },
-                    }}
-                  />
-                </div>
-              </div>
-
-              {Object.keys(groupedByShift).length > 0 && (
-                <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
-                  <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
-                    <Users className="w-3 h-3" />
-                    各班次掘进效率对比
+          {groupMode !== 'teamReview' && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="bg-gradient-to-br from-blue-900/40 to-blue-800/20 rounded-lg p-3 border border-blue-700/30">
+                  <p className="text-xs text-blue-300 mb-1">完成环数</p>
+                  <p className="text-xl font-bold text-white font-mono">
+                    {summary.totalRings}
+                    <span className="text-xs text-blue-400 ml-1">环</span>
                   </p>
-                  <div className="h-44">
-                    <Bar data={shiftEfficiencyData} options={{
-                      ...commonChartOptions,
-                      scales: {
-                        ...commonChartOptions.scales,
-                        y: {
-                          grid: { color: 'rgba(75, 85, 99, 0.3)' },
-                          ticks: { color: '#9CA3AF', font: { size: 10 } },
-                          title: { display: true, text: '效率 (%)', color: '#9CA3AF', font: { size: 10 } },
-                        },
-                      },
-                    }} />
-                  </div>
+                  <p className="text-[10px] text-blue-400/70">
+                    {summary.totalMileage.toFixed(1)} 米
+                  </p>
                 </div>
+                <div className="bg-gradient-to-br from-green-900/40 to-green-800/20 rounded-lg p-3 border border-green-700/30">
+                  <p className="text-xs text-green-300 mb-1">平均掘进效率</p>
+                  <p className="text-xl font-bold text-green-400 font-mono">
+                    {summary.avgExcavationEfficiency.toFixed(1)}
+                    <span className="text-xs text-green-400/70 ml-1">%</span>
+                  </p>
+                  <p className="text-[10px] text-green-400/70">
+                    总耗时 {(summary.totalExcavationTime + summary.totalAssemblyTime).toFixed(0)}s
+                  </p>
+                </div>
+                <div className="bg-gradient-to-br from-amber-900/40 to-amber-800/20 rounded-lg p-3 border border-amber-700/30">
+                  <p className="text-xs text-amber-300 mb-1">平均推力 / 扭矩</p>
+                  <p className="text-lg font-bold text-amber-400 font-mono">
+                    {summary.avgThrust.toFixed(0)}
+                    <span className="text-[10px] text-amber-300 ml-1">kN</span>
+                  </p>
+                  <p className="text-lg font-bold text-red-400 font-mono">
+                    {summary.avgTorque.toFixed(0)}
+                    <span className="text-[10px] text-red-300 ml-1">kN·m</span>
+                  </p>
+                </div>
+                <div className="bg-gradient-to-br from-red-900/40 to-red-800/20 rounded-lg p-3 border border-red-700/30">
+                  <p className="text-xs text-red-300 mb-1">告警情况</p>
+                  <p className="text-xl font-bold text-red-400 font-mono">
+                    {summary.ringsWithWarnings}
+                    <span className="text-xs text-red-300 ml-1">/ {summary.totalRings} 环</span>
+                  </p>
+                  <p className="text-[10px] text-red-400/70">
+                    共 {summary.totalWarnings} 次超限
+                  </p>
+                </div>
+              </div>
+
+              {filteredRecords.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                    <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                      <TrendingUp className="w-3 h-3" />
+                      掘进效率与拼装耗时趋势
+                    </p>
+                    <div className="h-44">
+                      <Line
+                        ref={trendChartRef}
+                        data={trendChartData}
+                        options={{
+                          ...commonChartOptions,
+                          scales: {
+                            ...commonChartOptions.scales,
+                            y: {
+                              position: 'left' as const,
+                              grid: { color: 'rgba(75, 85, 99, 0.3)' },
+                              ticks: { color: '#10B981', font: { size: 10 } },
+                              title: { display: true, text: '效率 (%)', color: '#10B981', font: { size: 10 } },
+                            },
+                            y1: {
+                              position: 'right' as const,
+                              grid: { drawOnChartArea: false },
+                              ticks: { color: '#06B6D4', font: { size: 10 } },
+                              title: { display: true, text: '拼装 (s)', color: '#06B6D4', font: { size: 10 } },
+                            },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                    <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      每环告警次数分布
+                    </p>
+                    <div className="h-44">
+                      <Bar
+                        ref={warningChartRef}
+                        data={warningTrendData}
+                        options={{
+                          ...commonChartOptions,
+                          scales: {
+                            ...commonChartOptions.scales,
+                            y: {
+                              grid: { color: 'rgba(75, 85, 99, 0.3)' },
+                              ticks: { color: '#EF4444', font: { size: 10 }, stepSize: 1 },
+                              title: { display: true, text: '次数', color: '#EF4444', font: { size: 10 } },
+                            },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                    <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                      <PieChart className="w-3 h-3" />
+                      地层占比汇总
+                    </p>
+                    <div className="h-44 flex items-center justify-center">
+                      <Doughnut
+                        ref={stratumChartRef}
+                        data={stratumChartData}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          plugins: {
+                            legend: {
+                              position: 'right' as const,
+                              labels: { color: '#9CA3AF', font: { size: 11 } },
+                            },
+                            tooltip: {
+                              backgroundColor: 'rgba(17, 24, 39, 0.9)',
+                              callbacks: {
+                                label: (ctx) => `${ctx.label}: ${ctx.parsed.toFixed(1)}%`,
+                              },
+                            },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {Object.keys(groupedByShift).length > 0 && (
+                    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                      <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                        <Users className="w-3 h-3" />
+                        各班次掘进效率对比
+                      </p>
+                      <div className="h-44">
+                        <Bar data={shiftEfficiencyData} options={{
+                          ...commonChartOptions,
+                          scales: {
+                            ...commonChartOptions.scales,
+                            y: {
+                              grid: { color: 'rgba(75, 85, 99, 0.3)' },
+                              ticks: { color: '#9CA3AF', font: { size: 10 } },
+                              title: { display: true, text: '效率 (%)', color: '#9CA3AF', font: { size: 10 } },
+                            },
+                          },
+                        }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {groupMode === 'teamReview' && (
+            <div className="space-y-4">
+              <div className="bg-gradient-to-r from-pink-900/30 to-purple-900/30 rounded-lg p-4 border border-pink-700/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <ArrowLeftRight className="w-5 h-5 text-pink-400" />
+                  <h3 className="text-lg font-bold text-white">班组复盘横向对照</h3>
+                </div>
+                <p className="text-xs text-gray-400">
+                  同日不同班次的推进效率、拼装耗时、告警密度和地层变化并排对比，快速发现节奏异常的班组
+                </p>
+              </div>
+
+              {teamReviewData.length === 0 ? (
+                <div className="h-32 flex items-center justify-center bg-gray-800/50 rounded-lg">
+                  <p className="text-gray-500 text-sm">暂无跨班次数据</p>
+                </div>
+              ) : (
+                teamReviewData.map(({ dateKey, shifts }) => {
+                  const shiftTypes = Object.keys(shifts) as ShiftType[];
+                  if (shiftTypes.length < 2) return null;
+
+                  const bestEfficiency = shiftTypes.reduce((best, st) => {
+                    const eff = shifts[st].summary.avgExcavationEfficiency;
+                    return eff > shifts[best].summary.avgExcavationEfficiency ? st : best;
+                  }, shiftTypes[0]);
+                  const worstEfficiency = shiftTypes.reduce((worst, st) => {
+                    const eff = shifts[st].summary.avgExcavationEfficiency;
+                    return eff < shifts[worst].summary.avgExcavationEfficiency ? st : worst;
+                  }, shiftTypes[0]);
+                  const maxWarnings = shiftTypes.reduce((max, st) => {
+                    return shifts[st].summary.totalWarnings > shifts[max].summary.totalWarnings ? st : max;
+                  }, shiftTypes[0]);
+
+                  return (
+                    <div key={dateKey} className="bg-gray-800/50 rounded-lg border border-gray-700 overflow-hidden">
+                      <div className="p-3 bg-gray-900/50 border-b border-gray-700 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Calendar className="w-4 h-4 text-pink-400" />
+                          <span className="text-white font-bold">{dateKey}</span>
+                          <span className="text-xs text-gray-500">{shiftTypes.length} 个班次</span>
+                        </div>
+                        <div className="flex gap-2 text-[10px]">
+                          {bestEfficiency && (
+                            <span className="px-2 py-0.5 bg-green-900/30 text-green-400 rounded">
+                              最高效率: {SHIFT_NAMES[bestEfficiency]}
+                            </span>
+                          )}
+                          {maxWarnings && shifts[maxWarnings].summary.totalWarnings > 0 && (
+                            <span className="px-2 py-0.5 bg-red-900/30 text-red-400 rounded">
+                              告警最多: {SHIFT_NAMES[maxWarnings]}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-0 divide-x divide-gray-700">
+                        {shiftTypes.map((st) => {
+                          const data = shifts[st];
+                          const s = data.summary;
+                          const isBest = st === bestEfficiency;
+                          const isWorstWarning = st === maxWarnings && s.totalWarnings > 0;
+
+                          return (
+                            <div
+                              key={st}
+                              className={`p-3 ${
+                                isBest ? 'bg-green-900/10' : isWorstWarning ? 'bg-red-900/10' : ''
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 mb-3">
+                                <div
+                                  className="w-6 h-6 rounded flex items-center justify-center"
+                                  style={{ backgroundColor: SHIFT_COLORS[st] + '33' }}
+                                >
+                                  <Users className="w-3 h-3" style={{ color: SHIFT_COLORS[st] }} />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-bold" style={{ color: SHIFT_COLORS[st] }}>
+                                    {SHIFT_NAMES[st]}
+                                  </p>
+                                  <p className="text-[10px] text-gray-500">
+                                    {data.records.length} 环 · {(data.records.length * RING_LENGTH).toFixed(1)}m
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400">掘进效率</span>
+                                  <span className={`text-sm font-mono font-bold ${isBest ? 'text-green-400' : 'text-white'}`}>
+                                    {s.avgExcavationEfficiency.toFixed(1)}%
+                                    {isBest && <span className="text-[9px] text-green-500 ml-1">▲</span>}
+                                  </span>
+                                </div>
+
+                                <div className="h-1 bg-gray-700 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full"
+                                    style={{
+                                      width: `${Math.min(100, s.avgExcavationEfficiency)}%`,
+                                      backgroundColor: SHIFT_COLORS[st],
+                                    }}
+                                  />
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400">拼装耗时</span>
+                                  <span className="text-sm font-mono text-cyan-400">
+                                    {(s.totalAssemblyTime / Math.max(1, data.records.length)).toFixed(1)}s/环
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400">平均推力</span>
+                                  <span className="text-sm font-mono text-yellow-400">
+                                    {s.avgThrust.toFixed(0)} kN
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400">平均扭矩</span>
+                                  <span className="text-sm font-mono text-red-400">
+                                    {s.avgTorque.toFixed(0)} kN·m
+                                  </span>
+                                </div>
+
+                                <div className="border-t border-gray-700/50 pt-2">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] text-gray-400">告警密度</span>
+                                    <span className={`text-sm font-mono ${isWorstWarning ? 'text-red-400 font-bold' : 'text-gray-300'}`}>
+                                      {s.totalWarnings}次 / {data.records.length}环
+                                      {isWorstWarning && <span className="text-[9px] text-red-500 ml-1">⚠</span>}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <p className="text-[10px] text-gray-400 mb-1">地层构成</p>
+                                  <div className="flex h-2 rounded-full overflow-hidden">
+                                    {data.records.length > 0 && (
+                                      <>
+                                        <div
+                                          className="bg-amber-900"
+                                          style={{ width: `${(data.records.reduce((s, r) => s + r.stratumDistribution.clay, 0) / data.records.length) * 100}%` }}
+                                        />
+                                        <div
+                                          className="bg-amber-500"
+                                          style={{ width: `${(data.records.reduce((s, r) => s + r.stratumDistribution.sand, 0) / data.records.length) * 100}%` }}
+                                        />
+                                        <div
+                                          className="bg-gray-500"
+                                          style={{ width: `${(data.records.reduce((s, r) => s + r.stratumDistribution.rock, 0) / data.records.length) * 100}%` }}
+                                        />
+                                      </>
+                                    )}
+                                  </div>
+                                  <div className="flex justify-between mt-0.5 text-[8px] text-gray-500">
+                                    <span>粘土</span>
+                                    <span>砂层</span>
+                                    <span>岩层</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
           )}
 
-          <div className="space-y-2 max-h-96 overflow-y-auto custom-scrollbar pr-1">
-            {groupMode === 'ring' && filteredRecords.map((record) => (
-              <RingDetailCard
-                key={record.ringNumber}
-                record={record}
-                expanded={expandedRings.has(record.ringNumber)}
-                showWarnings={showWarnings}
-                onToggle={() => toggleRingExpand(record.ringNumber)}
-              />
-            ))}
+          {groupMode !== 'teamReview' && (
+            <div className="space-y-2 max-h-96 overflow-y-auto custom-scrollbar pr-1">
+              {groupMode === 'ring' && filteredRecords.map((record) => (
+                <RingDetailCard
+                  key={record.ringNumber}
+                  record={record}
+                  expanded={expandedRings.has(record.ringNumber)}
+                  showWarnings={showWarnings}
+                  onToggle={() => toggleRingExpand(record.ringNumber)}
+                />
+              ))}
 
-            {groupMode === 'shift' && Object.entries(groupedByShift)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([key, records]) => {
-                const [dateKey, shiftType] = key.split('_');
-                const shift = shiftType as ShiftType;
-                const groupSummary = calculateSummary(records);
-                const expanded = expandedGroups.has(key);
-                return (
-                  <div key={key} className="bg-gray-800/80 rounded-lg border border-gray-700 overflow-hidden">
-                    <div
-                      className="p-3 cursor-pointer flex items-center gap-3"
-                      onClick={() => toggleGroupExpand(key)}
-                    >
+              {groupMode === 'shift' && Object.entries(groupedByShift)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([key, records]) => {
+                  const [dateKey, shiftType] = key.split('_');
+                  const shift = shiftType as ShiftType;
+                  const groupSummary = calculateSummary(records);
+                  const expanded = expandedGroups.has(key);
+                  return (
+                    <div key={key} className="bg-gray-800/80 rounded-lg border border-gray-700 overflow-hidden">
                       <div
-                        className="w-10 h-10 rounded-lg flex items-center justify-center"
-                        style={{ backgroundColor: SHIFT_COLORS[shift] + '33', borderColor: SHIFT_COLORS[shift] + '80' }}
+                        className="p-3 cursor-pointer flex items-center gap-3"
+                        onClick={() => toggleGroupExpand(key)}
                       >
-                        <Users className="w-5 h-5" style={{ color: SHIFT_COLORS[shift] }} />
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-white font-bold">{dateKey}</span>
-                          <span
-                            className="px-2 py-0.5 rounded text-xs font-medium"
-                            style={{ backgroundColor: SHIFT_COLORS[shift] + '33', color: SHIFT_COLORS[shift] }}
-                          >
-                            {SHIFT_NAMES[shift]}
-                          </span>
+                        <div
+                          className="w-10 h-10 rounded-lg flex items-center justify-center"
+                          style={{ backgroundColor: SHIFT_COLORS[shift] + '33', borderColor: SHIFT_COLORS[shift] + '80' }}
+                        >
+                          <Users className="w-5 h-5" style={{ color: SHIFT_COLORS[shift] }} />
                         </div>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          {records.length} 环 · 效率 {groupSummary.avgExcavationEfficiency.toFixed(1)}% · {groupSummary.totalWarnings} 次告警
-                        </p>
-                      </div>
-                      <div className="grid grid-cols-3 gap-3 text-center text-xs mr-3">
-                        <div>
-                          <p className="text-gray-500">平均推力</p>
-                          <p className="text-yellow-400 font-mono font-bold">{groupSummary.avgThrust.toFixed(0)}</p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500">平均扭矩</p>
-                          <p className="text-red-400 font-mono font-bold">{groupSummary.avgTorque.toFixed(0)}</p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500">平均速度</p>
-                          <p className="text-cyan-400 font-mono font-bold">{groupSummary.avgSpeed.toFixed(1)}</p>
-                        </div>
-                      </div>
-                      {expanded ? (
-                        <ChevronUp className="w-4 h-4 text-gray-500" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-gray-500" />
-                      )}
-                    </div>
-                    {expanded && (
-                      <div className="border-t border-gray-700/50 p-2 space-y-2">
-                        {records.map((r) => (
-                          <RingDetailCard
-                            key={r.ringNumber}
-                            record={r}
-                            expanded={expandedRings.has(r.ringNumber)}
-                            showWarnings={showWarnings}
-                            onToggle={() => toggleRingExpand(r.ringNumber)}
-                            compact
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-            {groupMode === 'date' && Object.entries(groupedByDate)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([dateKey, records]) => {
-                const groupSummary = calculateSummary(records);
-                const expanded = expandedGroups.has(dateKey);
-
-                const shiftBreakdown = SHIFT_CONFIGS.map((sc) => {
-                  const shiftRecords = records.filter((r) => r.shift === sc.type);
-                  return {
-                    ...sc,
-                    count: shiftRecords.length,
-                    summary: shiftRecords.length > 0 ? calculateSummary(shiftRecords) : null,
-                  };
-                });
-
-                return (
-                  <div key={dateKey} className="bg-gray-800/80 rounded-lg border border-gray-700 overflow-hidden">
-                    <div
-                      className="p-3 cursor-pointer flex items-center gap-3"
-                      onClick={() => toggleGroupExpand(dateKey)}
-                    >
-                      <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-pink-900/40 border border-pink-700/50">
-                        <Calendar className="w-5 h-5 text-pink-400" />
-                      </div>
-                      <div className="flex-1">
-                        <span className="text-white font-bold">{dateKey}</span>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          {records.length} 环 · 效率 {groupSummary.avgExcavationEfficiency.toFixed(1)}% · 里程 {(records.length * RING_LENGTH).toFixed(1)}m
-                        </p>
-                      </div>
-                      <div className="flex gap-1 mr-2">
-                        {shiftBreakdown.map((sb) => (
-                          sb.count > 0 && (
-                            <div
-                              key={sb.type}
-                              className="px-2 py-0.5 rounded text-[10px] font-medium"
-                              style={{ backgroundColor: SHIFT_COLORS[sb.type] + '33', color: SHIFT_COLORS[sb.type] }}
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-bold">{dateKey}</span>
+                            <span
+                              className="px-2 py-0.5 rounded text-xs font-medium"
+                              style={{ backgroundColor: SHIFT_COLORS[shift] + '33', color: SHIFT_COLORS[shift] }}
                             >
-                              {SHIFT_NAMES[sb.type]} {sb.count}环
-                            </div>
-                          )
-                        ))}
+                              {SHIFT_NAMES[shift]}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {records.length} 环 · 效率 {groupSummary.avgExcavationEfficiency.toFixed(1)}% · {groupSummary.totalWarnings} 次告警
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3 text-center text-xs mr-3">
+                          <div>
+                            <p className="text-gray-500">平均推力</p>
+                            <p className="text-yellow-400 font-mono font-bold">{groupSummary.avgThrust.toFixed(0)}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">平均扭矩</p>
+                            <p className="text-red-400 font-mono font-bold">{groupSummary.avgTorque.toFixed(0)}</p>
+                          </div>
+                          <div>
+                            <p className="text-gray-500">平均速度</p>
+                            <p className="text-cyan-400 font-mono font-bold">{groupSummary.avgSpeed.toFixed(1)}</p>
+                          </div>
+                        </div>
+                        {expanded ? (
+                          <ChevronUp className="w-4 h-4 text-gray-500" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-gray-500" />
+                        )}
                       </div>
-                      <div className="text-center mr-2">
-                        <p className="text-[10px] text-gray-500">告警</p>
-                        <p className={`font-mono font-bold ${groupSummary.totalWarnings > 0 ? 'text-red-400' : 'text-gray-400'}`}>
-                          {groupSummary.totalWarnings}
-                        </p>
-                      </div>
-                      {expanded ? (
-                        <ChevronUp className="w-4 h-4 text-gray-500" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      {expanded && (
+                        <div className="border-t border-gray-700/50 p-2 space-y-2">
+                          {records.map((r) => (
+                            <RingDetailCard
+                              key={r.ringNumber}
+                              record={r}
+                              expanded={expandedRings.has(r.ringNumber)}
+                              showWarnings={showWarnings}
+                              onToggle={() => toggleRingExpand(r.ringNumber)}
+                              compact
+                            />
+                          ))}
+                        </div>
                       )}
                     </div>
-                    {expanded && (
-                      <div className="border-t border-gray-700/50 p-2 space-y-2">
-                        {records.map((r) => (
-                          <RingDetailCard
-                            key={r.ringNumber}
-                            record={r}
-                            expanded={expandedRings.has(r.ringNumber)}
-                            showWarnings={showWarnings}
-                            onToggle={() => toggleRingExpand(r.ringNumber)}
-                            compact
-                          />
-                        ))}
+                  );
+                })}
+
+              {groupMode === 'date' && Object.entries(groupedByDate)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([dateKey, records]) => {
+                  const groupSummary = calculateSummary(records);
+                  const expanded = expandedGroups.has(dateKey);
+
+                  const shiftBreakdown = SHIFT_CONFIGS.map((sc) => {
+                    const shiftRecords = records.filter((r) => r.shift === sc.type);
+                    return {
+                      ...sc,
+                      count: shiftRecords.length,
+                      summary: shiftRecords.length > 0 ? calculateSummary(shiftRecords) : null,
+                    };
+                  });
+
+                  return (
+                    <div key={dateKey} className="bg-gray-800/80 rounded-lg border border-gray-700 overflow-hidden">
+                      <div
+                        className="p-3 cursor-pointer flex items-center gap-3"
+                        onClick={() => toggleGroupExpand(dateKey)}
+                      >
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-pink-900/40 border border-pink-700/50">
+                          <Calendar className="w-5 h-5 text-pink-400" />
+                        </div>
+                        <div className="flex-1">
+                          <span className="text-white font-bold">{dateKey}</span>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {records.length} 环 · 效率 {groupSummary.avgExcavationEfficiency.toFixed(1)}% · 里程 {(records.length * RING_LENGTH).toFixed(1)}m
+                          </p>
+                        </div>
+                        <div className="flex gap-1 mr-2">
+                          {shiftBreakdown.map((sb) => (
+                            sb.count > 0 && (
+                              <div
+                                key={sb.type}
+                                className="px-2 py-0.5 rounded text-[10px] font-medium"
+                                style={{ backgroundColor: SHIFT_COLORS[sb.type] + '33', color: SHIFT_COLORS[sb.type] }}
+                              >
+                                {SHIFT_NAMES[sb.type]} {sb.count}环
+                              </div>
+                            )
+                          ))}
+                        </div>
+                        <div className="text-center mr-2">
+                          <p className="text-[10px] text-gray-500">告警</p>
+                          <p className={`font-mono font-bold ${groupSummary.totalWarnings > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                            {groupSummary.totalWarnings}
+                          </p>
+                        </div>
+                        {expanded ? (
+                          <ChevronUp className="w-4 h-4 text-gray-500" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-gray-500" />
+                        )}
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-          </div>
+                      {expanded && (
+                        <div className="border-t border-gray-700/50 p-2 space-y-2">
+                          {records.map((r) => (
+                            <RingDetailCard
+                              key={r.ringNumber}
+                              record={r}
+                              expanded={expandedRings.has(r.ringNumber)}
+                              showWarnings={showWarnings}
+                              onToggle={() => toggleRingExpand(r.ringNumber)}
+                              compact
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -732,7 +976,7 @@ function RingDetailCard({
   compact?: boolean;
 }) {
   return (
-    <div className={`bg-gray-900/50 rounded-lg border border-gray-700 overflow-hidden hover:border-gray-600 transition-all ${compact ? '' : ''}`}>
+    <div className={`bg-gray-900/50 rounded-lg border border-gray-700 overflow-hidden hover:border-gray-600 transition-all`}>
       <div
         className={`cursor-pointer flex items-center gap-3 ${compact ? 'p-2' : 'p-3'}`}
         onClick={onToggle}

@@ -12,7 +12,8 @@ import {
 import { Line } from 'react-chartjs-2';
 import { TrendingUp } from 'lucide-react';
 import { useConstructionStore } from '../store/useConstructionStore';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
+import { RING_LENGTH } from '../utils/constants';
 
 ChartJS.register(
   CategoryScale,
@@ -29,6 +30,10 @@ type ChartType = 'thrust' | 'torque' | 'speed' | 'all';
 
 export function CurveChart() {
   const ringRecords = useConstructionStore((state) => state.ringRecords);
+  const playbackMode = useConstructionStore((state) => state.playbackMode);
+  const playbackIndex = useConstructionStore((state) => state.playbackIndex);
+  const playbackSnapshots = useConstructionStore((state) => state.playbackSnapshots);
+  const currentMileage = useConstructionStore((state) => state.currentMileage);
   const [chartType, setChartType] = useState<ChartType>('all');
 
   const labels = ringRecords.map((r) => `#${r.ringNumber}`);
@@ -37,7 +42,27 @@ export function CurveChart() {
   const torqueData = ringRecords.map((r) => r.averageTorque);
   const speedData = ringRecords.map((r) => r.averageSpeed);
 
+  const currentHighlightRing = useMemo(() => {
+    if (playbackMode !== 'playback' || playbackSnapshots.length === 0) {
+      const liveRing = Math.floor(currentMileage / RING_LENGTH);
+      return liveRing >= 0 && liveRing < ringRecords.length ? liveRing : null;
+    }
+    const snapshot = playbackSnapshots[playbackIndex];
+    if (!snapshot) return null;
+    const ringIdx = snapshot.ringNumber - 1;
+    return ringIdx >= 0 && ringIdx < ringRecords.length ? ringIdx : null;
+  }, [playbackMode, playbackIndex, playbackSnapshots, ringRecords, currentMileage]);
+
   const datasets = [];
+  const pointBgColors = ringRecords.map((_, i) =>
+    i === currentHighlightRing ? '#FBBF24' : undefined
+  );
+  const pointRadii = ringRecords.map((_, i) =>
+    i === currentHighlightRing ? 8 : 3
+  );
+  const pointBorderWidths = ringRecords.map((_, i) =>
+    i === currentHighlightRing ? 3 : 1
+  );
 
   if (chartType === 'all' || chartType === 'thrust') {
     datasets.push({
@@ -48,6 +73,10 @@ export function CurveChart() {
       fill: true,
       tension: 0.4,
       yAxisID: 'y',
+      pointBackgroundColor: pointBgColors,
+      pointRadius: pointRadii,
+      pointBorderWidth: pointBorderWidths,
+      pointBorderColor: '#fff',
     });
   }
 
@@ -60,6 +89,10 @@ export function CurveChart() {
       fill: true,
       tension: 0.4,
       yAxisID: 'y1',
+      pointBackgroundColor: pointBgColors,
+      pointRadius: pointRadii,
+      pointBorderWidth: pointBorderWidths,
+      pointBorderColor: '#fff',
     });
   }
 
@@ -72,6 +105,10 @@ export function CurveChart() {
       fill: true,
       tension: 0.4,
       yAxisID: 'y2',
+      pointBackgroundColor: pointBgColors,
+      pointRadius: pointRadii,
+      pointBorderWidth: pointBorderWidths,
+      pointBorderColor: '#fff',
     });
   }
 
@@ -98,11 +135,11 @@ export function CurveChart() {
         },
       },
       tooltip: {
-        backgroundColor: 'rgba(17, 24, 39, 0.9)',
+        backgroundColor: 'rgba(17, 24, 39, 0.95)',
         titleColor: '#F3F4F6',
         bodyColor: '#D1D5DB',
-        borderColor: '#374151',
-        borderWidth: 1,
+        borderColor: currentHighlightRing !== null ? '#FBBF24' : '#374151',
+        borderWidth: currentHighlightRing !== null ? 2 : 1,
         padding: 12,
       },
     },
@@ -200,6 +237,11 @@ export function CurveChart() {
         <h2 className="text-xl font-bold text-white flex items-center gap-2">
           <TrendingUp className="w-5 h-5 text-blue-400" />
           掘进参数曲线
+          {playbackMode === 'playback' && currentHighlightRing !== null && (
+            <span className="text-xs bg-purple-600/30 text-purple-300 px-2 py-0.5 rounded-full ml-2">
+              回放高亮: #{currentHighlightRing + 1}
+            </span>
+          )}
         </h2>
         <div className="flex gap-1">
           {chartButtons.map((btn) => (
@@ -235,18 +277,33 @@ export function CurveChart() {
             <p className="text-yellow-400 font-mono font-bold">
               {(thrustData.reduce((a, b) => a + b, 0) / thrustData.length).toFixed(0)}
             </p>
+            {currentHighlightRing !== null && (
+              <p className="text-[10px] text-yellow-300 mt-1">
+                当前: {thrustData[currentHighlightRing]?.toFixed(0) || '-'}
+              </p>
+            )}
           </div>
           <div className="bg-gray-800/50 rounded-lg p-3 text-center">
             <p className="text-xs text-gray-500">平均扭矩</p>
             <p className="text-red-400 font-mono font-bold">
               {(torqueData.reduce((a, b) => a + b, 0) / torqueData.length).toFixed(0)}
             </p>
+            {currentHighlightRing !== null && (
+              <p className="text-[10px] text-red-300 mt-1">
+                当前: {torqueData[currentHighlightRing]?.toFixed(0) || '-'}
+              </p>
+            )}
           </div>
           <div className="bg-gray-800/50 rounded-lg p-3 text-center">
             <p className="text-xs text-gray-500">平均速度</p>
             <p className="text-blue-400 font-mono font-bold">
               {(speedData.reduce((a, b) => a + b, 0) / speedData.length).toFixed(1)}
             </p>
+            {currentHighlightRing !== null && (
+              <p className="text-[10px] text-blue-300 mt-1">
+                当前: {speedData[currentHighlightRing]?.toFixed(1) || '-'}
+              </p>
+            )}
           </div>
         </div>
       )}

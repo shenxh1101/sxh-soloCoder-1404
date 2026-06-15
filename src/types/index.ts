@@ -2,7 +2,37 @@ export type StratumType = 'clay' | 'sand' | 'rock';
 
 export type WarningType = 'thrust' | 'torque';
 export type PlaybackMode = 'live' | 'playback';
-export type TimelineEventType = 'excavation_start' | 'excavation_end' | 'assembly_start' | 'assembly_end' | 'warning_start' | 'warning_end';
+export type TimelineEventType =
+  | 'excavation_start'
+  | 'excavation_end'
+  | 'assembly_start'
+  | 'assembly_end'
+  | 'warning_start'
+  | 'warning_end'
+  | 'stratum_change';
+
+export type BookmarkType =
+  | 'stratum_enter'
+  | 'warning_trigger'
+  | 'assembly_start'
+  | 'assembly_end'
+  | 'excavation_resume'
+  | 'mileage_milestone';
+
+export type ShiftType = 'morning' | 'afternoon' | 'night';
+
+export interface ShiftInfo {
+  type: ShiftType;
+  name: string;
+  startHour: number;
+  endHour: number;
+}
+
+export const SHIFT_CONFIGS: ShiftInfo[] = [
+  { type: 'morning', name: '早班', startHour: 6, endHour: 14 },
+  { type: 'afternoon', name: '中班', startHour: 14, endHour: 22 },
+  { type: 'night', name: '夜班', startHour: 22, endHour: 30 },
+];
 
 export interface StratumConfig {
   type: StratumType;
@@ -25,6 +55,7 @@ export interface WarningEvent {
   threshold: number;
   message: string;
   resolved: boolean;
+  snapshotIndex: number;
 }
 
 export interface TimelineEvent {
@@ -34,6 +65,21 @@ export interface TimelineEvent {
   timestamp: Date;
   mileage: number;
   description: string;
+  snapshotIndex: number;
+  metadata?: Record<string, number | string>;
+}
+
+export interface BookmarkNode {
+  id: string;
+  type: BookmarkType;
+  title: string;
+  description: string;
+  timestamp: Date;
+  mileage: number;
+  ringNumber: number;
+  snapshotIndex: number;
+  icon: string;
+  color: string;
   metadata?: Record<string, number | string>;
 }
 
@@ -61,6 +107,12 @@ export interface RingRecord {
   warningCount: number;
   warningEvents: WarningEvent[];
   timelineEvents: TimelineEvent[];
+  shift: ShiftType;
+  dateKey: string;
+  excavationEfficiency: number;
+  thrustSamples: number[];
+  torqueSamples: number[];
+  speedSamples: number[];
 }
 
 export interface PlaybackSnapshot {
@@ -73,6 +125,10 @@ export interface PlaybackSnapshot {
   ringNumber: number;
   hasWarning: boolean;
   awaitingAssembly: boolean;
+  isExcavating: boolean;
+  elapsedInRing: number;
+  ringProgress: number;
+  activeWarningTypes: WarningType[];
 }
 
 export interface ConstructionState {
@@ -83,6 +139,7 @@ export interface ConstructionState {
   totalThrust: number;
   torque: number;
   currentStratum: StratumType;
+  previousStratum: StratumType;
   thrustThreshold: number;
   torqueThreshold: number;
   ringRecords: RingRecord[];
@@ -103,11 +160,16 @@ export interface ConstructionState {
   activeWarningIds: string[];
   allWarnings: WarningEvent[];
   allTimelineEvents: TimelineEvent[];
+  bookmarks: BookmarkNode[];
   shieldPosition: number;
   playbackMode: PlaybackMode;
   playbackIndex: number;
   playbackSnapshots: PlaybackSnapshot[];
   playbackIsPlaying: boolean;
+  playbackHighlights: {
+    ringNumber: number | null;
+    eventId: string | null;
+  };
 }
 
 export interface SegmentData {
@@ -122,6 +184,9 @@ export interface SegmentData {
 export interface DailyReportFilter {
   startRing: number;
   endRing: number;
+  groupBy: 'ring' | 'shift' | 'date';
+  dateKey?: string;
+  shiftType?: ShiftType;
 }
 
 export interface DailyReportSummary {
@@ -136,4 +201,27 @@ export interface DailyReportSummary {
   peakTorque: number;
   totalWarnings: number;
   ringsWithWarnings: number;
+  avgExcavationEfficiency: number;
+}
+
+export interface ShiftGroupData {
+  shift: ShiftType;
+  shiftName: string;
+  dateKey: string;
+  rings: RingRecord[];
+  summary: DailyReportSummary;
+  stratumBreakdown: Record<StratumType, number>;
+}
+
+export interface DateGroupData {
+  dateKey: string;
+  shifts: ShiftGroupData[];
+  rings: RingRecord[];
+  summary: DailyReportSummary;
+}
+
+export interface ChartSyncState {
+  highlightedIndex: number;
+  highlightedRing: number;
+  isPlaybackMode: boolean;
 }

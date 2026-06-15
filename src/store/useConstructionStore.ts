@@ -7,6 +7,10 @@ import {
   TimelineEvent,
   PlaybackSnapshot,
   WarningType,
+  BookmarkNode,
+  BookmarkType,
+  ShiftType,
+  SHIFT_CONFIGS,
 } from '../types';
 import {
   RING_LENGTH,
@@ -15,6 +19,7 @@ import {
   DEFAULT_THRUST_THRESHOLD,
   DEFAULT_TORQUE_THRESHOLD,
   STRATUM_CONFIGS,
+  STRATUM_NAMES,
 } from '../utils/constants';
 import {
   getStratumAtMileage,
@@ -27,6 +32,22 @@ import {
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 11);
+}
+
+function getShiftForDate(date: Date): ShiftType {
+  const hour = date.getHours() + date.getMinutes() / 60;
+  for (const shift of SHIFT_CONFIGS) {
+    if (hour >= shift.startHour && hour < shift.endHour) {
+      return shift.type;
+    }
+  }
+  if (hour >= 22 || hour < 6) return 'night';
+  return 'morning';
+}
+
+function getDateKey(date: Date): string {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function calculateStratumDistribution(
@@ -45,9 +66,55 @@ function calculateStratumDistribution(
       distribution[config.type] = overlapLength / totalLength;
     }
   }
-
   return distribution;
 }
+
+function calculateExcavationEfficiency(
+  excavationTime: number,
+  totalTime: number
+): number {
+  if (totalTime <= 0) return 0;
+  return (excavationTime / totalTime) * 100;
+}
+
+const BOOKMARK_META: Record<BookmarkType, { icon: string; color: string; title: (m?: Record<string, any>) => string; desc: (m?: Record<string, any>) => string }> = {
+  stratum_enter: {
+    icon: '🪨',
+    color: '#8B6914',
+    title: (m) => `进入${m?.stratumName || '新地层'}`,
+    desc: (m) => `刀盘在里程 ${m?.mileage?.toFixed(2)}m 处进入${m?.stratumName}`,
+  },
+  warning_trigger: {
+    icon: '⚠️',
+    color: '#EF4444',
+    title: (m) => `${m?.warningType === 'thrust' ? '推力' : '扭矩'}超限`,
+    desc: (m) => `${m?.warningType === 'thrust' ? '推力' : '扭矩'}达到 ${m?.peakValue?.toFixed(0)}，超过阈值 ${m?.threshold?.toFixed(0)}`,
+  },
+  assembly_start: {
+    icon: '🔧',
+    color: '#06B6D4',
+    title: () => '开始拼装管片',
+    desc: (m) => `第 ${m?.ringNumber} 环掘进完成，开始拼装管片`,
+  },
+  assembly_end: {
+    icon: '✅',
+    color: '#10B981',
+    title: () => '管片拼装完成',
+    desc: (m) => `第 ${m?.ringNumber} 环拼装完成，用时 ${m?.assemblyTime?.toFixed(1)} 秒`,
+  },
+  excavation_resume: {
+    icon: '🚀',
+    color: '#3B82F6',
+    title: () => '恢复掘进',
+    desc: (m) => `拼装完成，恢复掘进施工`,
+  },
+  mileage_milestone: {
+    icon: '🎯',
+    color: '#A855F7',
+    title: (m) => `突破 ${m?.milestone} 米`,
+    desc: (m) => `累计掘进突破 ${m?.milestone} 米里程`,
+  },
+};
 
 interface ConstructionStore extends ConstructionState {
   setAdvanceSpeed: (speed: number) => void;
@@ -67,6 +134,9 @@ interface ConstructionStore extends ConstructionState {
   togglePlaybackPlay: () => void;
   stepPlayback: (direction: number) => void;
   getStratumDistributionAhead: (distance: number) => Record<StratumType, number>;
+  jumpToBookmark: (bookmarkId: string) => void;
+  addBookmark: (bookmark: Omit<BookmarkNode, 'id'>) => void;
+  getGroupedByShift: () => Record<string, any>;
 }
 
 const initialState: ConstructionState = {
@@ -77,6 +147,7 @@ const initialState: ConstructionState = {
   totalThrust: 0,
   torque: 0,
   currentStratum: 'clay',
+  previousStratum: 'clay',
   thrustThreshold: DEFAULT_THRUST_THRESHOLD,
   torqueThreshold: DEFAULT_TORQUE_THRESHOLD,
   ringRecords: [],
@@ -97,11 +168,13 @@ const initialState: ConstructionState = {
   activeWarningIds: [],
   allWarnings: [],
   allTimelineEvents: [],
+  bookmarks: [],
   shieldPosition: 0,
   playbackMode: 'live',
   playbackIndex: 0,
   playbackSnapshots: [],
   playbackIsPlaying: false,
+  playbackHighlights: { ringNumber: null, eventId: null },
 };
 
 export const useConstructionStore = create<ConstructionStore>((set, get) => ({
@@ -112,11 +185,44 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
   setThrustThreshold: (threshold: number) => set({ thrustThreshold: threshold }),
   setTorqueThreshold: (threshold: number) => set({ torqueThreshold: threshold }),
 
+  addBookmark: (bookmarkData) => {
+    set((state) => ({
+      bookmarks: [...state.bookmarks, { ...bookmarkData, id: generateId() }],
+    }));
+  },
+
+  jumpToBookmark: (bookmarkId) => {
+    const state = get();
+    const bookmark = state.bookmarks.find((b) => b.id === bookmarkId);
+    if (!bookmark) return;
+
+    if (state.playbackMode !== 'playback') {
+      set({ playbackMode: 'playback', playbackIsPlaying: false });
+    }
+    set({
+      playbackIndex: bookmark.snapshotIndex,
+      playbackHighlights: { ringNumber: bookmark.ringNumber, eventId: null },
+    });
+    const snapshot = state.playbackSnapshots[bookmark.snapshotIndex];
+    if (snapshot) {
+      set({
+        currentMileage: snapshot.mileage,
+        shieldPosition: snapshot.mileage,
+        totalThrust: snapshot.thrust,
+        torque: snapshot.torque,
+        currentStratum: snapshot.stratum,
+        hasWarning: snapshot.hasWarning,
+        awaitingSegmentAssembly: snapshot.awaitingAssembly,
+      });
+    }
+  },
+
   startConstruction: () => {
     const state = get();
     if (state.awaitingSegmentAssembly || state.playbackMode === 'playback') return;
 
     const now = new Date();
+    const snapshotIndex = state.playbackSnapshots.length;
     const newTimelineEvent: TimelineEvent = {
       id: generateId(),
       ringNumber: Math.floor(state.currentMileage / RING_LENGTH) + 1,
@@ -124,12 +230,32 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       timestamp: now,
       mileage: state.currentMileage,
       description: `第 ${state.ringRecords.length + 1} 环开始掘进`,
+      snapshotIndex,
     };
+
+    const milestone = Math.floor(state.currentMileage / 10) * 10;
+    const newBookmarks = [...state.bookmarks];
+    if (state.ringRecords.length > 0) {
+      const meta = BOOKMARK_META['excavation_resume'];
+      newBookmarks.push({
+        id: generateId(),
+        type: 'excavation_resume',
+        title: meta.title(),
+        description: meta.desc({ ringNumber: state.ringRecords.length + 1 }),
+        timestamp: now,
+        mileage: state.currentMileage,
+        ringNumber: state.ringRecords.length + 1,
+        snapshotIndex,
+        icon: meta.icon,
+        color: meta.color,
+      });
+    }
 
     set({
       isRunning: true,
       currentRingStartTime: state.currentRingStartTime || now,
       allTimelineEvents: [...state.allTimelineEvents, newTimelineEvent],
+      bookmarks: newBookmarks,
     });
   },
 
@@ -165,6 +291,12 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
 
     const previousRingNumber = Math.floor(state.currentMileage / RING_LENGTH);
     const newRingNumber = Math.floor(newMileage / RING_LENGTH);
+    const currentRingNum = state.ringRecords.length + 1;
+
+    const currentRingStartMileage = (currentRingNum - 1) * RING_LENGTH;
+    const ringProgress = Math.max(0, Math.min(1, (newMileage - currentRingStartMileage) / RING_LENGTH));
+    const currentRingStartTime = state.currentRingStartTime || new Date();
+    const elapsedInRing = (Date.now() - currentRingStartTime.getTime()) / 1000;
 
     let hasWarning = state.hasWarning;
     let warningMessage = state.warningMessage;
@@ -172,9 +304,60 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
     let newActiveWarningIds = [...state.activeWarningIds];
     let newAllWarnings = [...state.allWarnings];
     let newTimelineEvents = [...state.allTimelineEvents];
+    let newBookmarks = [...state.bookmarks];
+    let newPreviousStratum = state.previousStratum;
 
-    const currentRingNum = state.ringRecords.length + 1;
     const now = new Date();
+    const snapshotIndex = state.playbackSnapshots.length;
+    const activeWarningTypes: WarningType[] = [];
+
+    if (stratumType !== state.previousStratum && state.currentMileage > 0) {
+      const stratumName = STRATUM_NAMES[stratumType];
+      const meta = BOOKMARK_META['stratum_enter'];
+      newBookmarks.push({
+        id: generateId(),
+        type: 'stratum_enter',
+        title: meta.title({ stratumName }),
+        description: meta.desc({ mileage: newMileage, stratumName }),
+        timestamp: now,
+        mileage: newMileage,
+        ringNumber: currentRingNum,
+        snapshotIndex,
+        icon: meta.icon,
+        color: meta.color,
+        metadata: { stratumType, stratumName },
+      });
+      newTimelineEvents.push({
+        id: generateId(),
+        ringNumber: currentRingNum,
+        type: 'stratum_change',
+        timestamp: now,
+        mileage: newMileage,
+        description: `进入${stratumName}`,
+        snapshotIndex,
+        metadata: { stratumType },
+      });
+      newPreviousStratum = stratumType;
+    }
+
+    const prevMilestone = Math.floor(state.currentMileage / 10) * 10;
+    const currMilestone = Math.floor(newMileage / 10) * 10;
+    if (currMilestone > prevMilestone && currMilestone > 0) {
+      const meta = BOOKMARK_META['mileage_milestone'];
+      newBookmarks.push({
+        id: generateId(),
+        type: 'mileage_milestone',
+        title: meta.title({ milestone: currMilestone }),
+        description: meta.desc({ milestone: currMilestone }),
+        timestamp: now,
+        mileage: newMileage,
+        ringNumber: currentRingNum,
+        snapshotIndex,
+        icon: meta.icon,
+        color: meta.color,
+        metadata: { milestone: currMilestone },
+      });
+    }
 
     const checkAndHandleWarning = (
       type: WarningType,
@@ -188,9 +371,15 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       });
 
       if (value > threshold) {
+        activeWarningTypes.push(type);
         const displayValue = value.toFixed(0);
         if (activeWarning) {
           newAllWarnings = newAllWarnings.map((w) =>
+            w.id === activeWarning
+              ? { ...w, peakValue: Math.max(w.peakValue, value) }
+              : w
+          );
+          newCurrentRingWarnings = newCurrentRingWarnings.map((w) =>
             w.id === activeWarning
               ? { ...w, peakValue: Math.max(w.peakValue, value) }
               : w
@@ -213,6 +402,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
             threshold,
             message: `${valueName}超过阈值: ${displayValue} > ${threshold}`,
             resolved: false,
+            snapshotIndex,
           };
           newAllWarnings.push(newWarning);
           newCurrentRingWarnings.push(newWarning);
@@ -229,7 +419,23 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
             timestamp: now,
             mileage: newMileage,
             description: `${valueName}超限告警: ${displayValue} > ${threshold}`,
+            snapshotIndex,
             metadata: { type, value, threshold },
+          });
+
+          const meta = BOOKMARK_META['warning_trigger'];
+          newBookmarks.push({
+            id: generateId(),
+            type: 'warning_trigger',
+            title: meta.title({ warningType: type }),
+            description: meta.desc({ peakValue: value, threshold, warningType: type }),
+            timestamp: now,
+            mileage: newMileage,
+            ringNumber: currentRingNum,
+            snapshotIndex,
+            icon: meta.icon,
+            color: meta.color,
+            metadata: { type, peakValue: value, threshold },
           });
         }
       } else if (activeWarning) {
@@ -248,6 +454,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
           timestamp: now,
           mileage: newMileage,
           description: `${valueName}恢复正常`,
+          snapshotIndex,
           metadata: { type, value },
         });
 
@@ -268,17 +475,19 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       torque,
       speed: actualSpeed,
       stratum: stratumType,
-      ringNumber: newRingNumber + 1,
+      ringNumber: currentRingNum,
       hasWarning,
       awaitingAssembly: false,
+      isExcavating: true,
+      elapsedInRing,
+      ringProgress,
+      activeWarningTypes,
     };
     const newSnapshots = [...state.playbackSnapshots, newSnapshot];
 
     if (newRingNumber > previousRingNumber && newMileage < 100) {
       const assemblyStartTime = new Date();
-
-      const ringStartMileage = previousRingNumber * RING_LENGTH;
-      const ringEndMileage = newRingNumber * RING_LENGTH;
+      const assemblySnapshotIndex = newSnapshots.length;
 
       newTimelineEvents.push({
         id: generateId(),
@@ -287,7 +496,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         timestamp: assemblyStartTime,
         mileage: newMileage,
         description: `第 ${currentRingNum} 环掘进完成`,
-        metadata: { duration: (assemblyStartTime.getTime() - (state.currentRingStartTime?.getTime() || now.getTime())) / 1000 },
+        snapshotIndex: assemblySnapshotIndex,
+        metadata: { duration: elapsedInRing },
       });
 
       newTimelineEvents.push({
@@ -297,6 +507,22 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         timestamp: assemblyStartTime,
         mileage: newMileage,
         description: `第 ${currentRingNum} 环开始拼装管片`,
+        snapshotIndex: assemblySnapshotIndex,
+      });
+
+      const assemblyMeta = BOOKMARK_META['assembly_start'];
+      newBookmarks.push({
+        id: generateId(),
+        type: 'assembly_start',
+        title: assemblyMeta.title(),
+        description: assemblyMeta.desc({ ringNumber: currentRingNum }),
+        timestamp: assemblyStartTime,
+        mileage: newMileage,
+        ringNumber: currentRingNum,
+        snapshotIndex: assemblySnapshotIndex,
+        icon: assemblyMeta.icon,
+        color: assemblyMeta.color,
+        metadata: { ringNumber: currentRingNum },
       });
 
       const snapshotWithAssembly: PlaybackSnapshot = {
@@ -306,9 +532,13 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         torque,
         speed: actualSpeed,
         stratum: stratumType,
-        ringNumber: newRingNumber + 1,
+        ringNumber: currentRingNum,
         hasWarning,
         awaitingAssembly: true,
+        isExcavating: false,
+        elapsedInRing,
+        ringProgress: 1,
+        activeWarningTypes,
       };
 
       set({
@@ -316,7 +546,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         shieldPosition: newShieldPosition,
         totalThrust: thrust,
         torque: torque,
-        currentStratum: stratumType as StratumType,
+        currentStratum: stratumType,
+        previousStratum: newPreviousStratum,
         hasWarning,
         warningMessage,
         isRunning: false,
@@ -334,6 +565,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         activeWarningIds: newActiveWarningIds,
         allWarnings: newAllWarnings,
         allTimelineEvents: newTimelineEvents,
+        bookmarks: newBookmarks,
         playbackSnapshots: [...newSnapshots, snapshotWithAssembly],
       });
       return;
@@ -344,7 +576,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       shieldPosition: newShieldPosition,
       totalThrust: thrust,
       torque: torque,
-      currentStratum: stratumType as StratumType,
+      currentStratum: stratumType,
+      previousStratum: newPreviousStratum,
       hasWarning,
       warningMessage,
       ringThrustSamples: newThrustSamples,
@@ -359,6 +592,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       activeWarningIds: newActiveWarningIds,
       allWarnings: newAllWarnings,
       allTimelineEvents: newTimelineEvents,
+      bookmarks: newBookmarks,
       playbackSnapshots: newSnapshots,
     });
   },
@@ -377,6 +611,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
     const excavationStartTime = startTime;
     const excavationEndTime = assemblyStartTime;
     const excavationTime = (excavationEndTime.getTime() - excavationStartTime.getTime()) / 1000;
+    const totalTime = (endTime.getTime() - startTime.getTime()) / 1000;
 
     const ringStartMileage = (ringNumber - 1) * RING_LENGTH;
     const ringEndMileage = ringNumber * RING_LENGTH;
@@ -390,8 +625,13 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       endTime: w.endTime || assemblyEndTime,
       resolved: true,
     }));
-
     const hasRingWarning = finalWarnings.length > 0;
+
+    const shift = getShiftForDate(startTime);
+    const dateKey = getDateKey(startTime);
+    const efficiency = calculateExcavationEfficiency(excavationTime, totalTime);
+
+    const snapshotIndex = state.playbackSnapshots.length;
 
     const newTimelineEvents = [
       ...state.allTimelineEvents,
@@ -402,7 +642,26 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         timestamp: assemblyEndTime,
         mileage: state.currentMileage,
         description: `第 ${ringNumber} 环管片拼装完成，用时 ${assemblyTime.toFixed(1)} 秒`,
+        snapshotIndex,
         metadata: { assemblyTime },
+      },
+    ];
+
+    const assemblyEndMeta = BOOKMARK_META['assembly_end'];
+    const newBookmarks = [
+      ...state.bookmarks,
+      {
+        id: generateId(),
+        type: 'assembly_end' as BookmarkType,
+        title: assemblyEndMeta.title(),
+        description: assemblyEndMeta.desc({ ringNumber, assemblyTime }),
+        timestamp: assemblyEndTime,
+        mileage: state.currentMileage,
+        ringNumber,
+        snapshotIndex,
+        icon: assemblyEndMeta.icon,
+        color: assemblyEndMeta.color,
+        metadata: { ringNumber, assemblyTime },
       },
     ];
 
@@ -430,6 +689,12 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       warningCount: finalWarnings.length,
       warningEvents: finalWarnings,
       timelineEvents: state.allTimelineEvents.filter((e) => e.ringNumber === ringNumber),
+      shift,
+      dateKey,
+      excavationEfficiency: efficiency,
+      thrustSamples: [...state.ringThrustSamples],
+      torqueSamples: [...state.ringTorqueSamples],
+      speedSamples: [...state.ringSpeedSamples],
     };
 
     const nextSnapshot: PlaybackSnapshot = {
@@ -442,6 +707,10 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       ringNumber: ringNumber + 1,
       hasWarning: false,
       awaitingAssembly: false,
+      isExcavating: true,
+      elapsedInRing: 0,
+      ringProgress: 0,
+      activeWarningTypes: [],
     };
 
     set({
@@ -463,6 +732,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       warningMessage: '',
       isRunning: true,
       allTimelineEvents: newTimelineEvents,
+      bookmarks: newBookmarks,
       playbackSnapshots: [...state.playbackSnapshots, nextSnapshot],
     });
   },
@@ -470,12 +740,6 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
   clearWarning: () => {
     const state = get();
     const now = new Date();
-
-    const resolvedWarnings = state.activeWarningIds.map((id) => ({
-      ...state.allWarnings.find((w) => w.id === id)!,
-      endTime: now,
-      resolved: true,
-    }));
 
     const newTimelineEvents = state.activeWarningIds.map((id) => {
       const w = state.allWarnings.find((ww) => ww.id === id);
@@ -486,6 +750,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         timestamp: now,
         mileage: state.currentMileage,
         description: `告警已确认清除: ${w?.type === 'thrust' ? '推力' : '扭矩'}`,
+        snapshotIndex: state.playbackSnapshots.length - 1,
       };
     });
 
@@ -520,7 +785,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
   setPlaybackMode: (mode: 'live' | 'playback') => {
     const state = get();
     if (mode === 'playback' && state.playbackSnapshots.length === 0) return;
-    
+
     if (mode === 'live') {
       const lastSnapshot = state.playbackSnapshots[state.playbackSnapshots.length - 1];
       if (lastSnapshot) {
@@ -534,15 +799,25 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
           currentStratum: lastSnapshot.stratum,
           hasWarning: lastSnapshot.hasWarning,
           awaitingSegmentAssembly: lastSnapshot.awaitingAssembly,
+          playbackHighlights: { ringNumber: null, eventId: null },
         });
       } else {
         set({ playbackMode: mode, playbackIsPlaying: false });
       }
     } else {
+      const lastIndex = state.playbackSnapshots.length - 1;
+      const snapshot = state.playbackSnapshots[lastIndex];
       set({
         playbackMode: mode,
         playbackIsPlaying: false,
-        playbackIndex: state.playbackSnapshots.length - 1,
+        playbackIndex: lastIndex,
+        currentMileage: snapshot?.mileage || 0,
+        shieldPosition: snapshot?.mileage || 0,
+        totalThrust: snapshot?.thrust || 0,
+        torque: snapshot?.torque || 0,
+        currentStratum: snapshot?.stratum || 'clay',
+        hasWarning: snapshot?.hasWarning || false,
+        awaitingSegmentAssembly: snapshot?.awaitingAssembly || false,
       });
     }
   },
@@ -562,6 +837,7 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       currentStratum: snapshot.stratum,
       hasWarning: snapshot.hasWarning,
       awaitingSegmentAssembly: snapshot.awaitingAssembly,
+      playbackHighlights: { ringNumber: snapshot.ringNumber, eventId: null },
     });
   },
 
@@ -581,5 +857,23 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
   getStratumDistributionAhead: (distance: number): Record<StratumType, number> => {
     const state = get();
     return calculateStratumDistribution(state.currentMileage, state.currentMileage + distance);
+  },
+
+  getGroupedByShift: () => {
+    const state = get();
+    const result: Record<string, any> = {};
+    for (const record of state.ringRecords) {
+      const key = `${record.dateKey}_${record.shift}`;
+      if (!result[key]) {
+        result[key] = {
+          dateKey: record.dateKey,
+          shift: record.shift,
+          rings: [],
+          summary: null,
+        };
+      }
+      result[key].rings.push(record);
+    }
+    return result;
   },
 }));

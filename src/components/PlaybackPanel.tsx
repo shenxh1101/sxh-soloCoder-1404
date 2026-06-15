@@ -22,6 +22,10 @@ import {
   X,
   Activity,
   Link,
+  Scissors,
+  Package,
+  RefreshCw,
+  Download,
 } from 'lucide-react';
 import { useConstructionStore } from '../store/useConstructionStore';
 import { RING_LENGTH, STRATUM_NAMES } from '../utils/constants';
@@ -83,6 +87,10 @@ export function PlaybackPanel() {
   const [bookmarkFilter, setBookmarkFilter] = useState<BookmarkType | 'all'>('all');
   const [showBookmarks, setShowBookmarks] = useState(true);
   const [contextBookmark, setContextBookmark] = useState<BookmarkNode | null>(null);
+  const [clipStart, setClipStart] = useState<number | null>(null);
+  const [clipEnd, setClipEnd] = useState<number | null>(null);
+  const [isSelectingClip, setIsSelectingClip] = useState(false);
+  const [showClipPack, setShowClipPack] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -192,6 +200,236 @@ export function PlaybackPanel() {
       },
     };
   }, [contextBookmark, totalSnapshots, playbackSnapshots, allTimelineEvents, bookmarks]);
+
+  const clipPackData = useMemo(() => {
+    if (clipStart === null || clipEnd === null || totalSnapshots === 0) return null;
+    const start = Math.min(clipStart, clipEnd);
+    const end = Math.max(clipStart, clipEnd);
+    const clipSnapshots = playbackSnapshots.slice(start, end + 1);
+    if (clipSnapshots.length === 0) return null;
+
+    const clipEvents = allTimelineEvents.filter(
+      (e) => e.snapshotIndex >= start && e.snapshotIndex <= end
+    ).sort((a, b) => a.snapshotIndex - b.snapshotIndex);
+
+    const clipBookmarks = bookmarks.filter(
+      (b) => b.snapshotIndex >= start && b.snapshotIndex <= end
+    ).sort((a, b) => a.snapshotIndex - b.snapshotIndex);
+
+    const clipWarnings = clipEvents.filter(
+      (e) => e.type === 'warning_start'
+    );
+
+    const startS = clipSnapshots[0];
+    const endS = clipSnapshots[clipSnapshots.length - 1];
+
+    const thrusts = clipSnapshots.map((s) => s.thrust);
+    const torques = clipSnapshots.map((s) => s.torque);
+    const speeds = clipSnapshots.map((s) => s.speed);
+
+    const ringSet = new Set(clipSnapshots.map((s) => s.ringNumber));
+    const ringRange = `${Math.min(...ringSet)} — ${Math.max(...ringSet)}`;
+
+    const mileageStart = startS.mileage;
+    const mileageEnd = endS.mileage;
+    const distance = mileageEnd - mileageStart;
+
+    const excavationSnapshots = clipSnapshots.filter((s) => s.isExcavating);
+    const assemblySnapshots = clipSnapshots.filter((s) => s.awaitingAssembly);
+    const excavationRatio = clipSnapshots.length > 0
+      ? (excavationSnapshots.length / clipSnapshots.length) * 100
+      : 0;
+
+    return {
+      start,
+      end,
+      frameCount: clipSnapshots.length,
+      ringRange,
+      rings: Array.from(ringSet).sort((a, b) => a - b),
+      mileageStart,
+      mileageEnd,
+      distance,
+      events: clipEvents,
+      bookmarks: clipBookmarks,
+      warnings: clipWarnings,
+      startSnapshot: startS,
+      endSnapshot: endS,
+      avgThrust: thrusts.reduce((a, b) => a + b, 0) / thrusts.length,
+      minThrust: Math.min(...thrusts),
+      maxThrust: Math.max(...thrusts),
+      avgTorque: torques.reduce((a, b) => a + b, 0) / torques.length,
+      minTorque: Math.min(...torques),
+      maxTorque: Math.max(...torques),
+      avgSpeed: speeds.reduce((a, b) => a + b, 0) / speeds.length,
+      excavationRatio,
+      assemblyRatio: (assemblySnapshots.length / clipSnapshots.length) * 100,
+    };
+  }, [clipStart, clipEnd, totalSnapshots, playbackSnapshots, allTimelineEvents, bookmarks]);
+
+  const handleToggleClipSelection = () => {
+    if (isSelectingClip) {
+      setIsSelectingClip(false);
+      setClipStart(null);
+      setClipEnd(null);
+      setShowClipPack(false);
+    } else {
+      setIsSelectingClip(true);
+      setClipStart(playbackIndex);
+      setClipEnd(null);
+      setShowClipPack(false);
+    }
+  };
+
+  const handleSetClipPoint = () => {
+    if (!isSelectingClip) return;
+    if (clipStart === null) {
+      setClipStart(playbackIndex);
+    } else if (clipEnd === null) {
+      setClipEnd(playbackIndex);
+      setIsSelectingClip(false);
+      setShowClipPack(true);
+    } else {
+      setClipStart(playbackIndex);
+      setClipEnd(null);
+    }
+  };
+
+  const exportClipPack = () => {
+    if (!clipPackData) return;
+    const {
+      start, end, frameCount, ringRange, mileageStart, mileageEnd, distance,
+      events, bookmarks, warnings,
+      startSnapshot, endSnapshot,
+      avgThrust, minThrust, maxThrust,
+      avgTorque, minTorque, maxTorque,
+      avgSpeed, excavationRatio, assemblyRatio,
+    } = clipPackData;
+
+    const eventRows = events.map((e, i) => `
+      <tr style="${e.type.includes('warning') ? 'background:rgba(239,68,68,0.08)' : ''}">
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${i + 1}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${e.type.includes('warning') ? '⚠️' : e.type.includes('assembly') ? '🔧' : e.type.includes('stratum') ? '🪨' : '▶️'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${e.description}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${e.ringNumber}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${e.mileage.toFixed(1)}m</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${new Date(e.timestamp).toLocaleTimeString()}</td>
+      </tr>
+    `).join('');
+
+    const bookmarkRows = bookmarks.map((b, i) => `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.icon}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.title}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.description || '-'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${b.ringNumber}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${b.mileage.toFixed(1)}m</td>
+      </tr>
+    `).join('');
+
+    const warningRows = warnings.map((w, i) => `
+      <tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${i + 1}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${w.description}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">#${w.ringNumber}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #374151;">${w.mileage.toFixed(1)}m</td>
+      </tr>
+    `).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<title>盾构复盘片段 — #${ringRange}环 ${mileageStart.toFixed(1)}-${mileageEnd.toFixed(1)}m</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; padding: 30px; }
+  h1 { font-size: 24px; margin-bottom: 4px; background: linear-gradient(to right, #06b6d4, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .meta { color:#94a3b8; font-size:13px; margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns: repeat(4,1fr); gap:12px; margin-bottom:24px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:10px; padding:14px; }
+  .card .label { color:#94a3b8; font-size:11px; margin-bottom:4px; }
+  .card .value { font-size:20px; font-weight:bold; font-family:monospace; }
+  .blue{color:#3b82f6}.green{color:#10b981}.amber{color:#f59e0b}.red{color:#ef4444}.cyan{color:#06b6d4}
+  table { width:100%; border-collapse:collapse; background:#1e293b; border-radius:8px; overflow:hidden; margin-bottom:20px;}
+  th { background:#0f172a; color:#94a3b8; font-size:12px; padding:10px; text-align:left; border-bottom:2px solid #334155; }
+  td { font-size:13px; }
+  h2 { font-size:17px; margin:24px 0 12px; border-left:4px solid #06b6d4; padding-left:10px; }
+</style></head><body>
+  <h1>盾构施工复盘片段</h1>
+  <p class="meta">
+    帧范围: ${start} — ${end} (${frameCount}帧) &nbsp;|&nbsp;
+    环号: ${ringRange}环 &nbsp;|&nbsp;
+    里程: ${mileageStart.toFixed(1)}m — ${mileageEnd.toFixed(1)}m (推进 ${distance.toFixed(2)}m) &nbsp;|&nbsp;
+    生成时间: ${new Date().toLocaleString()}
+  </p>
+
+  <div class="grid">
+    <div class="card"><div class="label">片段时长占比</div>
+      <div class="value green">${excavationRatio.toFixed(1)}%</div>
+      <div class="label" style="margin-top:6px">掘进 / 拼装</div>
+      <div class="value cyan" style="font-size:14px">${excavationRatio.toFixed(0)}% / ${assemblyRatio.toFixed(0)}%</div>
+    </div>
+    <div class="card"><div class="label">平均推力 (范围)</div>
+      <div class="value amber">${avgThrust.toFixed(0)}</div>
+      <div class="label" style="margin-top:6px">最小 — 最大</div>
+      <div class="value amber" style="font-size:14px">${minThrust.toFixed(0)} — ${maxThrust.toFixed(0)} kN</div>
+    </div>
+    <div class="card"><div class="label">平均扭矩 (范围)</div>
+      <div class="value red">${avgTorque.toFixed(0)}</div>
+      <div class="label" style="margin-top:6px">最小 — 最大</div>
+      <div class="value red" style="font-size:14px">${minTorque.toFixed(0)} — ${maxTorque.toFixed(0)} kN·m</div>
+    </div>
+    <div class="card"><div class="label">告警次数 / 关键节点</div>
+      <div class="value ${warnings.length > 0 ? 'red' : 'green'}">${warnings.length} / ${bookmarks.length}</div>
+      <div class="label" style="margin-top:6px">平均推进速度</div>
+      <div class="value blue" style="font-size:14px">${avgSpeed.toFixed(1)} mm/min</div>
+    </div>
+  </div>
+
+  <h2>时间轴事件链 (${events.length})</h2>
+  <table><thead><tr><th>#</th><th>图标</th><th>事件</th><th>环号</th><th>里程</th><th>时间</th></tr></thead>
+  <tbody>${eventRows}</tbody></table>
+
+  ${bookmarks.length > 0 ? `<h2>关键节点 (${bookmarks.length})</h2>
+  <table><thead><tr><th>图标</th><th>标题</th><th>描述</th><th>环号</th><th>里程</th></tr></thead>
+  <tbody>${bookmarkRows}</tbody></table>` : ''}
+
+  ${warnings.length > 0 ? `<h2>告警演变 (${warnings.length})</h2>
+  <table><thead><tr><th>#</th><th>告警内容</th><th>环号</th><th>里程</th></tr></thead>
+  <tbody>${warningRows}</tbody></table>` : ''}
+
+  <h2>起止参数对照</h2>
+  <div class="grid">
+    <div class="card"><div class="label">起始状态</div>
+      <div class="value cyan" style="font-size:15px">${startSnapshot.isExcavating ? '掘进中' : startSnapshot.awaitingAssembly ? '拼装中' : '待机'}</div>
+      <div class="label" style="margin-top:4px">推力 / 扭矩</div>
+      <div style="font-size:13px;font-family:monospace">${startSnapshot.thrust.toFixed(0)}kN / ${startSnapshot.torque.toFixed(0)}kN·m</div>
+    </div>
+    <div class="card"><div class="label">终止状态</div>
+      <div class="value cyan" style="font-size:15px">${endSnapshot.isExcavating ? '掘进中' : endSnapshot.awaitingAssembly ? '拼装中' : '待机'}</div>
+      <div class="label" style="margin-top:4px">推力 / 扭矩</div>
+      <div style="font-size:13px;font-family:monospace">${endSnapshot.thrust.toFixed(0)}kN / ${endSnapshot.torque.toFixed(0)}kN·m</div>
+    </div>
+    <div class="card"><div class="label">起始环号 / 里程</div>
+      <div class="value blue" style="font-size:15px">#${startSnapshot.ringNumber}</div>
+      <div style="font-size:13px;font-family:monospace" class="amber">${startSnapshot.mileage.toFixed(2)} m</div>
+    </div>
+    <div class="card"><div class="label">终止环号 / 里程</div>
+      <div class="value blue" style="font-size:15px">#${endSnapshot.ringNumber}</div>
+      <div style="font-size:13px;font-family:monospace" class="amber">${endSnapshot.mileage.toFixed(2)} m</div>
+    </div>
+  </div>
+</body></html>`;
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `盾构复盘片段_${ringRange}环_${mileageStart.toFixed(0)}-${mileageEnd.toFixed(0)}m_${new Date().toISOString().slice(0,10)}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="bg-gray-900/90 backdrop-blur-md rounded-xl p-5 border border-gray-700 shadow-2xl">
@@ -388,9 +626,80 @@ export function PlaybackPanel() {
               >
                 <SkipForward className="w-4 h-4 text-white" />
               </button>
+
+              <div className="w-px h-6 bg-gray-600 mx-1" />
+
+              <button
+                onClick={handleSetClipPoint}
+                disabled={!isSelectingClip || playbackMode !== 'playback'}
+                className={`p-2 rounded-lg transition-all ${
+                  isSelectingClip
+                    ? clipStart !== null && clipEnd === null
+                      ? 'bg-cyan-600 hover:bg-cyan-500 animate-pulse'
+                      : 'bg-cyan-800/50 border border-cyan-600'
+                    : 'bg-gray-700 opacity-30 cursor-not-allowed'
+                }`}
+                title={clipStart === null ? '选择片段起点' : clipEnd === null ? '选择片段终点' : '重新选择起点'}
+              >
+                <Scissors className={`w-4 h-4 ${isSelectingClip ? 'text-white' : 'text-gray-500'}`} />
+              </button>
+
+              <button
+                onClick={handleToggleClipSelection}
+                disabled={playbackMode !== 'playback'}
+                className={`p-2 rounded-lg transition-all ${
+                  playbackMode !== 'playback'
+                    ? 'bg-gray-700 opacity-30 cursor-not-allowed'
+                    : isSelectingClip
+                      ? 'bg-red-600 hover:bg-red-500'
+                      : (clipStart !== null && clipEnd !== null)
+                        ? 'bg-teal-600 hover:bg-teal-500'
+                        : 'bg-gray-700 hover:bg-gray-600'
+                }`}
+                title={isSelectingClip ? '取消片段选择' : clipStart !== null && clipEnd !== null ? '查看打包结果' : '开始框选片段'}
+              >
+                {isSelectingClip ? (
+                  <RefreshCw className="w-4 h-4 text-white" />
+                ) : (
+                  <Package className={`w-4 h-4 ${clipStart !== null && clipEnd !== null ? 'text-white' : 'text-gray-400'}`} />
+                )}
+              </button>
             </div>
 
+            {(isSelectingClip || (clipStart !== null && clipEnd !== null)) && (
+              <div className={`mt-2 p-2 rounded text-xs ${isSelectingClip ? 'bg-cyan-900/30 border border-cyan-700/50 text-cyan-300' : 'bg-teal-900/30 border border-teal-700/50 text-teal-300'}`}>
+                {isSelectingClip
+                  ? clipStart === null
+                    ? '📍 将回放头拖到起点位置，然后点击 ✂️ 按钮设置起点'
+                    : clipEnd === null
+                      ? `📍 起点已设（帧 #${clipStart}），将头拖到终点，再次点击 ✂️ 按钮设置终点`
+                      : ''
+                  : `✅ 片段已选定：帧 #${Math.min(clipStart!, clipEnd!)} — #${Math.max(clipStart!, clipEnd!)} ，共 ${Math.abs(clipEnd! - clipStart!) + 1} 帧`
+                }
+              </div>
+            )}
+
             <div className="space-y-2">
+              {clipStart !== null && clipEnd !== null && (
+                <div className="relative h-2 rounded-lg bg-gray-700 overflow-hidden">
+                  <div
+                    className="absolute h-full bg-gradient-to-r from-cyan-500/50 to-teal-500/50 border-x-2 border-cyan-400"
+                    style={{
+                      left: `${(Math.min(clipStart, clipEnd) / totalSnapshots) * 100}%`,
+                      width: `${(Math.abs(clipEnd - clipStart) / totalSnapshots) * 100}%`,
+                    }}
+                  />
+                  <div
+                    className="absolute top-0 h-full w-1 bg-cyan-400 shadow-lg shadow-cyan-400/50"
+                    style={{ left: `${(Math.min(clipStart, clipEnd) / totalSnapshots) * 100}%` }}
+                  />
+                  <div
+                    className="absolute top-0 h-full w-1 bg-teal-400 shadow-lg shadow-teal-400/50"
+                    style={{ left: `${(Math.max(clipStart, clipEnd) / totalSnapshots) * 100}%` }}
+                  />
+                </div>
+              )}
+
               <input
                 type="range"
                 min={0}
@@ -578,6 +887,98 @@ export function PlaybackPanel() {
                       {b.icon} {b.title}
                     </button>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {clipPackData && showClipPack && (
+            <div className="bg-gradient-to-br from-teal-900/40 to-cyan-900/30 rounded-lg p-4 border border-teal-700/50 shadow-lg shadow-teal-900/20">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Package className="w-4 h-4 text-teal-400" />
+                  <span className="text-sm font-bold text-teal-200">复盘片段打包</span>
+                  <span className="text-[10px] text-gray-400">
+                    #{clipPackData.ringRange}环 · {clipPackData.mileageStart.toFixed(1)}-{clipPackData.mileageEnd.toFixed(1)}m
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={exportClipPack}
+                    className="flex items-center gap-1 px-3 py-1 bg-teal-600 hover:bg-teal-500 text-white text-xs rounded-md font-medium transition-all"
+                  >
+                    <Download className="w-3 h-3" />
+                    导出HTML
+                  </button>
+                  <button
+                    onClick={() => { setShowClipPack(false); }}
+                    className="p-1 rounded hover:bg-gray-700/50 transition-colors"
+                  >
+                    <X className="w-4 h-4 text-gray-500" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2 mb-3">
+                <div className="bg-gray-900/50 rounded p-2">
+                  <p className="text-[9px] text-gray-500">推进距离</p>
+                  <p className="text-sm font-bold text-cyan-400 font-mono">{clipPackData.distance.toFixed(2)}m</p>
+                </div>
+                <div className="bg-gray-900/50 rounded p-2">
+                  <p className="text-[9px] text-gray-500">掘进占比</p>
+                  <p className="text-sm font-bold text-green-400 font-mono">{clipPackData.excavationRatio.toFixed(0)}%</p>
+                </div>
+                <div className="bg-gray-900/50 rounded p-2">
+                  <p className="text-[9px] text-gray-500">平均推力</p>
+                  <p className="text-sm font-bold text-yellow-400 font-mono">{clipPackData.avgThrust.toFixed(0)}</p>
+                </div>
+                <div className="bg-gray-900/50 rounded p-2">
+                  <p className="text-[9px] text-gray-500">告警/节点</p>
+                  <p className="text-sm font-bold font-mono">
+                    <span className="text-red-400">{clipPackData.warnings.length}</span>
+                    <span className="text-gray-600"> / </span>
+                    <span className="text-teal-400">{clipPackData.bookmarks.length}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div className="bg-gray-900/30 rounded p-2">
+                  <p className="text-gray-500 mb-1">参数范围</p>
+                  <p className="text-gray-400">
+                    推力: <span className="text-yellow-400 font-mono">{clipPackData.minThrust.toFixed(0)}~{clipPackData.maxThrust.toFixed(0)}</span>
+                  </p>
+                  <p className="text-gray-400">
+                    扭矩: <span className="text-red-400 font-mono">{clipPackData.minTorque.toFixed(0)}~{clipPackData.maxTorque.toFixed(0)}</span>
+                  </p>
+                </div>
+                <div className="bg-gray-900/30 rounded p-2">
+                  <p className="text-gray-500 mb-1">起止状态</p>
+                  <p className="text-gray-400">
+                    起: <span className="text-cyan-400 font-mono">#{clipPackData.startSnapshot.ringNumber} · {clipPackData.mileageStart.toFixed(1)}m</span>
+                  </p>
+                  <p className="text-gray-400">
+                    止: <span className="text-cyan-400 font-mono">#{clipPackData.endSnapshot.ringNumber} · {clipPackData.mileageEnd.toFixed(1)}m</span>
+                  </p>
+                </div>
+              </div>
+
+              {clipPackData.bookmarks.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-teal-700/30">
+                  <p className="text-[10px] text-teal-300 mb-1.5">🔗 关键节点链 ({clipPackData.bookmarks.length})</p>
+                  <div className="space-y-0.5 max-h-24 overflow-y-auto custom-scrollbar">
+                    {clipPackData.bookmarks.map((b) => (
+                      <button
+                        key={b.id}
+                        onClick={() => handleBookmarkClick(b)}
+                        className="w-full text-left flex items-center gap-2 text-[11px] p-1 rounded hover:bg-teal-900/30 transition-colors"
+                      >
+                        <span>{b.icon}</span>
+                        <span className="text-gray-300 truncate">{b.title}</span>
+                        <span className="text-gray-600 ml-auto flex-shrink-0">#{b.ringNumber}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

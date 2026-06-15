@@ -121,6 +121,8 @@ export interface PlaybackSnapshot {
   thrust: number;
   torque: number;
   speed: number;
+  advanceSpeed: number;
+  cutterRotationSpeed: number;
   stratum: StratumType;
   ringNumber: number;
   hasWarning: boolean;

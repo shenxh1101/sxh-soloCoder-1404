@@ -78,6 +78,8 @@ export function DailyReportView() {
   const trendChartRef = useRef<any>(null);
   const warningChartRef = useRef<any>(null);
   const stratumChartRef = useRef<any>(null);
+  const teamEfficiencyChartRef = useRef<any>(null);
+  const teamWarningChartRef = useRef<any>(null);
 
   const maxRing = ringRecords.length;
   const effectiveEndRing = endRing === 0 || endRing > maxRing ? maxRing : endRing;
@@ -151,14 +153,78 @@ export function DailyReportView() {
         const canvas = stratumChartRef.current.canvas;
         if (canvas) images.stratum = canvas.toDataURL('image/png');
       }
+      if (teamEfficiencyChartRef.current) {
+        const canvas = teamEfficiencyChartRef.current.canvas;
+        if (canvas) images.teamEfficiency = canvas.toDataURL('image/png');
+      }
+      if (teamWarningChartRef.current) {
+        const canvas = teamWarningChartRef.current.canvas;
+        if (canvas) images.teamWarning = canvas.toDataURL('image/png');
+      }
     } catch {}
     return images;
   }, []);
 
+  const allRecordsForExport = useMemo(() => ringRecords.slice(), [ringRecords]);
+  const allSummaryForExport = useMemo(() => calculateSummary(ringRecords), [ringRecords]);
+  const allGroupedByDateForExport = useMemo(() => {
+    const groups: Record<string, RingRecord[]> = {};
+    for (const record of ringRecords) {
+      if (!groups[record.dateKey]) groups[record.dateKey] = [];
+      groups[record.dateKey].push(record);
+    }
+    return groups;
+  }, [ringRecords]);
+  const allGroupedByShiftForExport = useMemo(() => {
+    const groups: Record<string, RingRecord[]> = {};
+    for (const record of ringRecords) {
+      const key = `${record.dateKey}_${record.shift}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(record);
+    }
+    return groups;
+  }, [ringRecords]);
+  const allTeamReviewForExport = useMemo(() => {
+    const dateKeys = Object.keys(allGroupedByDateForExport).sort();
+    return dateKeys.map((dateKey) => {
+      const dayRecords = allGroupedByDateForExport[dateKey];
+      const shifts: Record<ShiftType, { records: RingRecord[]; summary: DailyReportSummary }> = {} as any;
+      for (const sc of SHIFT_CONFIGS) {
+        const shiftRecords = dayRecords.filter((r) => r.shift === sc.type);
+        if (shiftRecords.length > 0) {
+          shifts[sc.type] = {
+            records: shiftRecords,
+            summary: calculateSummary(shiftRecords),
+          };
+        }
+      }
+      return { dateKey, shifts };
+    });
+  }, [allGroupedByDateForExport]);
+
   const handleExportReport = () => {
     const chartImages = getChartImages();
-    exportDailyReportToExcel(filteredRecords, summary, bookmarks, allWarnings, effectiveStartRing, effectiveEndRing);
-    exportDailyReportToHTML(filteredRecords, summary, bookmarks, effectiveStartRing, effectiveEndRing, chartImages);
+    const fullStartRing = 1;
+    const fullEndRing = ringRecords.length;
+    const fullAllWarnings = ringRecords.flatMap((r) => r.warningEvents);
+    exportDailyReportToExcel(
+      allRecordsForExport,
+      allSummaryForExport,
+      bookmarks,
+      fullAllWarnings,
+      fullStartRing,
+      fullEndRing,
+      allTeamReviewForExport,
+    );
+    exportDailyReportToHTML(
+      allRecordsForExport,
+      allSummaryForExport,
+      bookmarks,
+      fullStartRing,
+      fullEndRing,
+      chartImages,
+      allTeamReviewForExport,
+    );
   };
 
   const trendChartData = useMemo(() => {
@@ -280,6 +346,129 @@ export function DailyReportView() {
       return { dateKey, shifts };
     });
   }, [groupedByDate]);
+
+  const shiftTrendData = useMemo(() => {
+    const byShift: Record<ShiftType, { dateKey: string; summary: DailyReportSummary }[]> = {
+      morning: [],
+      afternoon: [],
+      night: [],
+    };
+    const dateKeys = Object.keys(groupedByDate).sort();
+    for (const dateKey of dateKeys) {
+      for (const sc of SHIFT_CONFIGS) {
+        const shiftRecords = groupedByDate[dateKey].filter((r) => r.shift === sc.type);
+        if (shiftRecords.length > 0) {
+          byShift[sc.type].push({
+            dateKey,
+            summary: calculateSummary(shiftRecords),
+          });
+        }
+      }
+    }
+    return byShift;
+  }, [groupedByDate]);
+
+  const shiftAnomalies = useMemo(() => {
+    const anomalies: { shift: ShiftType; dateKey: string; type: 'slowdown' | 'warning_spike' | 'low_efficiency'; message: string }[] = [];
+
+    for (const sc of SHIFT_CONFIGS) {
+      const points = shiftTrendData[sc.type];
+      if (points.length < 2) continue;
+
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1].summary;
+        const curr = points[i].summary;
+
+        if (prev.avgExcavationEfficiency > 0) {
+          const drop = ((prev.avgExcavationEfficiency - curr.avgExcavationEfficiency) / prev.avgExcavationEfficiency) * 100;
+          if (drop > 20 && curr.avgExcavationEfficiency < 60) {
+            anomalies.push({
+              shift: sc.type,
+              dateKey: points[i].dateKey,
+              type: 'slowdown',
+              message: `效率从前一日的 ${prev.avgExcavationEfficiency.toFixed(0)}% 下降到 ${curr.avgExcavationEfficiency.toFixed(0)}%，跌幅 ${drop.toFixed(0)}%`,
+            });
+          }
+        }
+
+        if (prev.totalWarnings === 0 && curr.totalWarnings >= 2) {
+          anomalies.push({
+            shift: sc.type,
+            dateKey: points[i].dateKey,
+            type: 'warning_spike',
+            message: `告警次数突增：此前0次，当天出现 ${curr.totalWarnings} 次超限`,
+          });
+        }
+
+        if (curr.avgExcavationEfficiency < 40 && curr.totalRings >= 1) {
+          anomalies.push({
+            shift: sc.type,
+            dateKey: points[i].dateKey,
+            type: 'low_efficiency',
+            message: `效率异常偏低：仅 ${curr.avgExcavationEfficiency.toFixed(0)}%`,
+          });
+        }
+      }
+    }
+
+    return anomalies;
+  }, [shiftTrendData]);
+
+  const shiftEfficiencyTrendChartData = useMemo(() => {
+    const allDates = new Set<string>();
+    for (const sc of SHIFT_CONFIGS) {
+      for (const p of shiftTrendData[sc.type]) {
+        allDates.add(p.dateKey);
+      }
+    }
+    const labels = Array.from(allDates).sort();
+
+    const datasets = SHIFT_CONFIGS
+      .filter((sc) => shiftTrendData[sc.type].length > 0)
+      .map((sc) => {
+        const data = labels.map((date) => {
+          const found = shiftTrendData[sc.type].find((p) => p.dateKey === date);
+          return found ? Number(found.summary.avgExcavationEfficiency.toFixed(1)) : null;
+        });
+        return {
+          label: `${SHIFT_NAMES[sc.type]}效率(%)`,
+          data,
+          borderColor: SHIFT_COLORS[sc.type],
+          backgroundColor: SHIFT_COLORS[sc.type] + '22',
+          tension: 0.35,
+          spanGaps: true,
+          pointRadius: 4,
+        };
+      });
+    return { labels, datasets };
+  }, [shiftTrendData]);
+
+  const shiftWarningTrendChartData = useMemo(() => {
+    const allDates = new Set<string>();
+    for (const sc of SHIFT_CONFIGS) {
+      for (const p of shiftTrendData[sc.type]) {
+        allDates.add(p.dateKey);
+      }
+    }
+    const labels = Array.from(allDates).sort();
+
+    const datasets = SHIFT_CONFIGS
+      .filter((sc) => shiftTrendData[sc.type].length > 0)
+      .map((sc) => {
+        const data = labels.map((date) => {
+          const found = shiftTrendData[sc.type].find((p) => p.dateKey === date);
+          return found ? found.summary.totalWarnings : 0;
+        });
+        return {
+          label: `${SHIFT_NAMES[sc.type]}告警次数`,
+          data,
+          backgroundColor: SHIFT_COLORS[sc.type] + 'AA',
+          borderColor: SHIFT_COLORS[sc.type],
+          borderWidth: 1,
+        };
+      });
+    return { labels, datasets };
+  }, [shiftTrendData]);
 
   const commonChartOptions = {
     responsive: true,
@@ -748,6 +937,99 @@ export function DailyReportView() {
                     </div>
                   );
                 })
+              )}
+
+              {shiftAnomalies.length > 0 && (
+                <div className="bg-gradient-to-r from-orange-900/30 to-red-900/30 rounded-lg p-4 border border-orange-700/40">
+                  <div className="flex items-center gap-2 mb-3">
+                    <AlertTriangle className="w-5 h-5 text-orange-400" />
+                    <h3 className="text-sm font-bold text-orange-200">
+                      异常节奏检测 ({shiftAnomalies.length} 项)
+                    </h3>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {shiftAnomalies.map((a, i) => {
+                      const colorMap = {
+                        slowdown: { bg: 'bg-yellow-900/30', border: 'border-yellow-700/40', text: 'text-yellow-300', label: '效率下滑 ⬇' },
+                        warning_spike: { bg: 'bg-red-900/30', border: 'border-red-700/40', text: 'text-red-300', label: '告警突增 ⚠' },
+                        low_efficiency: { bg: 'bg-orange-900/30', border: 'border-orange-700/40', text: 'text-orange-300', label: '效率偏低 ◔' },
+                      };
+                      const c = colorMap[a.type];
+                      return (
+                        <div
+                          key={i}
+                          className={`${c.bg} ${c.border} border rounded-lg p-3 text-xs`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`font-bold ${c.text}`}>{c.label}</span>
+                            <span
+                              className="px-2 py-0.5 rounded text-[10px]"
+                              style={{ backgroundColor: SHIFT_COLORS[a.shift] + '33', color: SHIFT_COLORS[a.shift] }}
+                            >
+                              {a.dateKey.slice(5)} · {SHIFT_NAMES[a.shift]}
+                            </span>
+                          </div>
+                          <p className="text-gray-300">{a.message}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {shiftEfficiencyTrendChartData.labels.length > 1 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                    <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                      <TrendingUp className="w-3 h-3" />
+                      连续多天各班次掘进效率趋势
+                    </p>
+                    <div className="h-48">
+                      <Line
+                        ref={teamEfficiencyChartRef}
+                        data={shiftEfficiencyTrendChartData}
+                        options={{
+                          ...commonChartOptions,
+                          scales: {
+                            ...commonChartOptions.scales,
+                            y: {
+                              position: 'left' as const,
+                              grid: { color: 'rgba(75, 85, 99, 0.3)' },
+                              ticks: { color: '#9CA3AF', font: { size: 10 } },
+                              title: { display: true, text: '效率 (%)', color: '#9CA3AF', font: { size: 10 } },
+                              min: 0,
+                              max: 100,
+                            },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+                    <p className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      连续多天各班次告警密度趋势
+                    </p>
+                    <div className="h-48">
+                      <Bar
+                        ref={teamWarningChartRef}
+                        data={shiftWarningTrendChartData}
+                        options={{
+                          ...commonChartOptions,
+                          scales: {
+                            ...commonChartOptions.scales,
+                            y: {
+                              position: 'left' as const,
+                              grid: { color: 'rgba(75, 85, 99, 0.3)' },
+                              ticks: { color: '#9CA3AF', font: { size: 10 }, stepSize: 1 },
+                              title: { display: true, text: '告警次数', color: '#9CA3AF', font: { size: 10 } },
+                            },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           )}

@@ -1,6 +1,17 @@
 import * as XLSX from 'xlsx';
-import { RingRecord, DailyReportSummary, BookmarkNode, WarningEvent, BookmarkType } from '../types';
+import { RingRecord, DailyReportSummary, BookmarkNode, WarningEvent, BookmarkType, ShiftType } from '../types';
 import { STRATUM_NAMES, RING_LENGTH } from './constants';
+
+const SHIFT_COLORS: Record<ShiftType, string> = {
+  morning: '#F59E0B',
+  afternoon: '#3B82F6',
+  night: '#8B5CF6',
+};
+const SHIFT_NAMES: Record<ShiftType, string> = {
+  morning: '早班',
+  afternoon: '中班',
+  night: '夜班',
+};
 
 const BOOKMARK_TYPE_NAMES: Record<BookmarkType, string> = {
   stratum_enter: '地层变化',
@@ -91,7 +102,8 @@ export function exportDailyReportToExcel(
   bookmarks: BookmarkNode[],
   allWarnings: WarningEvent[],
   startRing: number,
-  endRing: number
+  endRing: number,
+  teamReview?: { dateKey: string; shifts: Record<ShiftType, { records: RingRecord[]; summary: DailyReportSummary }> }[]
 ): void {
   const wb = XLSX.utils.book_new();
 
@@ -244,6 +256,40 @@ export function exportDailyReportToExcel(
     XLSX.utils.book_append_sheet(wb, wsWarnings, '告警明细');
   }
 
+  if (teamReview && teamReview.length > 0) {
+    const teamReviewData: any[] = [];
+    let idx = 1;
+    for (const day of teamReview) {
+      const shiftTypes = Object.keys(day.shifts) as ShiftType[];
+      for (const st of shiftTypes) {
+        const s = day.shifts[st].summary;
+        teamReviewData.push({
+          '序号': idx++,
+          '日期': day.dateKey,
+          '班次': SHIFT_NAMES[st],
+          '完成环数': s.totalRings,
+          '掘进里程(m)': s.totalMileage.toFixed(1),
+          '平均效率(%)': s.avgExcavationEfficiency.toFixed(1),
+          '平均速度(mm/min)': s.avgSpeed.toFixed(1),
+          '平均推力(kN)': s.avgThrust.toFixed(0),
+          '平均扭矩(kN·m)': s.avgTorque.toFixed(0),
+          '拼装总时长(分钟)': (s.totalAssemblyTime / 60).toFixed(2),
+          '告警次数': s.totalWarnings,
+          '告警环数': s.ringsWithWarnings,
+        });
+      }
+    }
+    if (teamReviewData.length > 0) {
+      const wsTeam = XLSX.utils.json_to_sheet(teamReviewData);
+      wsTeam['!cols'] = [
+        { wch: 8 }, { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 14 },
+        { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
+        { wch: 10 }, { wch: 10 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsTeam, '班组对照');
+    }
+  }
+
   XLSX.writeFile(wb, `盾构施工日报_${startRing}-${endRing}环_${formatDateForFilename()}.xlsx`);
 }
 
@@ -339,7 +385,8 @@ export function exportDailyReportToHTML(
   bookmarks: BookmarkNode[],
   startRing: number,
   endRing: number,
-  chartImages: Record<string, string>
+  chartImages: Record<string, string>,
+  teamReview?: { dateKey: string; shifts: Record<ShiftType, { records: RingRecord[]; summary: DailyReportSummary }> }[]
 ): void {
   const filteredBookmarks = bookmarks.filter(
     (b) => b.ringNumber >= startRing && b.ringNumber <= endRing
@@ -414,6 +461,57 @@ export function exportDailyReportToHTML(
       </div>`
     : '';
 
+  const teamEfficiencySection = chartImages.teamEfficiency
+    ? `<div style="margin-bottom:30px;">
+        <h3 style="color:#8B5CF6;font-size:16px;margin-bottom:10px;">📊 连续多天各班次掘进效率趋势</h3>
+        <img src="${chartImages.teamEfficiency}" style="max-width:100%;border-radius:8px;border:1px solid #374151;" />
+      </div>`
+    : '';
+
+  const teamWarningSection = chartImages.teamWarning
+    ? `<div style="margin-bottom:30px;">
+        <h3 style="color:#EF4444;font-size:16px;margin-bottom:10px;">⚠️ 连续多天各班次告警密度趋势</h3>
+        <img src="${chartImages.teamWarning}" style="max-width:100%;border-radius:8px;border:1px solid #374151;" />
+      </div>`
+    : '';
+
+  let teamReviewSection = '';
+  if (teamReview && teamReview.length > 0) {
+    const teamRows = teamReview.flatMap((day) => {
+      const shiftTypes = Object.keys(day.shifts) as ShiftType[];
+      return shiftTypes.map((st) => {
+        const s = day.shifts[st].summary;
+        return `
+          <tr>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;">${day.dateKey}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;color:${SHIFT_COLORS[st]};font-weight:bold;">${SHIFT_NAMES[st]}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;">${s.totalRings} 环</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;">${s.totalMileage.toFixed(1)} m</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;color:#10B981;font-weight:bold;">${s.avgExcavationEfficiency.toFixed(1)}%</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;">${s.avgThrust.toFixed(0)}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;">${s.avgTorque.toFixed(0)}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #374151;color:${s.totalWarnings > 0 ? '#EF4444' : '#64748B'};font-weight:bold;">${s.totalWarnings > 0 ? `${s.totalWarnings} 次` : '—'}</td>
+          </tr>
+        `;
+      });
+    }).join('');
+
+    teamReviewSection = `
+      <div class="section">
+        <h2>班组对照（按日期×班次）</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>日期</th><th>班次</th><th>完成环数</th><th>掘进里程</th>
+              <th>平均效率</th><th>平均推力(kN)</th><th>平均扭矩(kN·m)</th><th>告警</th>
+            </tr>
+          </thead>
+          <tbody>${teamRows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -478,6 +576,8 @@ export function exportDailyReportToHTML(
     ${trendImageSection}
     ${warningImageSection}
     ${stratumImageSection}
+    ${teamEfficiencySection}
+    ${teamWarningSection}
   </div>
 
   <div class="section">
@@ -517,6 +617,8 @@ export function exportDailyReportToHTML(
     </table>
   </div>
   ` : ''}
+
+  ${teamReviewSection}
 
   <div style="text-align:center;color:#475569;font-size:11px;margin-top:40px;padding-top:20px;border-top:1px solid #334155;">
     盾构机隧道掘进模拟系统 — 自动生成施工日报

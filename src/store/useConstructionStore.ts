@@ -199,22 +199,10 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
     if (state.playbackMode !== 'playback') {
       set({ playbackMode: 'playback', playbackIsPlaying: false });
     }
+    state.setPlaybackIndex(bookmark.snapshotIndex);
     set({
-      playbackIndex: bookmark.snapshotIndex,
       playbackHighlights: { ringNumber: bookmark.ringNumber, eventId: null },
     });
-    const snapshot = state.playbackSnapshots[bookmark.snapshotIndex];
-    if (snapshot) {
-      set({
-        currentMileage: snapshot.mileage,
-        shieldPosition: snapshot.mileage,
-        totalThrust: snapshot.thrust,
-        torque: snapshot.torque,
-        currentStratum: snapshot.stratum,
-        hasWarning: snapshot.hasWarning,
-        awaitingSegmentAssembly: snapshot.awaitingAssembly,
-      });
-    }
   },
 
   startConstruction: () => {
@@ -474,6 +462,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       thrust,
       torque,
       speed: actualSpeed,
+      advanceSpeed: state.advanceSpeed,
+      cutterRotationSpeed: state.cutterRotationSpeed,
       stratum: stratumType,
       ringNumber: currentRingNum,
       hasWarning,
@@ -531,6 +521,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
         thrust,
         torque,
         speed: actualSpeed,
+        advanceSpeed: state.advanceSpeed,
+        cutterRotationSpeed: state.cutterRotationSpeed,
         stratum: stratumType,
         ringNumber: currentRingNum,
         hasWarning,
@@ -703,6 +695,8 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       thrust: state.totalThrust,
       torque: state.torque,
       speed: calculateAverage(state.ringSpeedSamples),
+      advanceSpeed: state.advanceSpeed,
+      cutterRotationSpeed: state.cutterRotationSpeed,
       stratum: state.currentStratum,
       ringNumber: ringNumber + 1,
       hasWarning: false,
@@ -837,6 +831,9 @@ export const useConstructionStore = create<ConstructionStore>((set, get) => ({
       currentStratum: snapshot.stratum,
       hasWarning: snapshot.hasWarning,
       awaitingSegmentAssembly: snapshot.awaitingAssembly,
+      advanceSpeed: snapshot.advanceSpeed,
+      cutterRotationSpeed: snapshot.cutterRotationSpeed,
+      isRunning: snapshot.isExcavating,
       playbackHighlights: { ringNumber: snapshot.ringNumber, eventId: null },
     });
   },
